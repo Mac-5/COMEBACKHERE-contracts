@@ -206,6 +206,11 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 /// immediately blocking a different batch — are not penalized for using both in succession.
 pub const BULK_OP_COOLDOWN_SECS: u64 = 60;
 
+/// Maximum number of operators in the bounded operator set (#595).
+/// Compliance teams rarely exceed this size; keeping the set small avoids
+/// unbounded storage-rent growth and keeps auth-check iteration cheap.
+pub const MAX_OPERATORS: u32 = 10;
+
 #[contract]
 pub struct ComplianceContract;
 
@@ -1002,6 +1007,105 @@ impl ComplianceContract {
         env.storage().instance().get(&DataKey::Operator)
     }
 
+    /// Add an operator to the bounded operator set. Only admin may call this.
+    ///
+    /// The operator set is stored under [`DataKey::Operators`] and is bounded by
+    /// [`MAX_OPERATORS`]. Adding an address that is already in the set is a no-op
+    /// (idempotent). Not gated behind `require_not_paused` — role management is
+    /// permitted while paused (same policy as `transfer_admin`).
+    ///
+    /// # Parameters
+    /// - `admin`: Current administrator. Must authorize this call.
+    /// - `operator`: The address to add to the operator set.
+    ///
+    /// # Errors
+    /// - [`ContractError::Unauthorized`] if `admin` is not the stored administrator.
+    /// - [`ContractError::OperatorSetFull`] if the set already contains [`MAX_OPERATORS`]
+    ///   distinct operators.
+    ///
+    /// # Events
+    /// Publishes `("operator_added",) → operator`.
+    pub fn add_operator(
+        env: Env,
+        admin: Address,
+        operator: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        let mut operators: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Operators)
+            .unwrap_or(Vec::new(&env));
+        // Idempotent: if already present, do nothing.
+        for op in operators.iter() {
+            if op == operator {
+                return Ok(());
+            }
+        }
+        if operators.len() >= MAX_OPERATORS {
+            return Err(ContractError::OperatorSetFull);
+        }
+        operators.push_back(operator.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::Operators, &operators);
+        env.events()
+            .publish((Symbol::new(&env, "operator_added"),), operator);
+        Ok(())
+    }
+
+    /// Remove an operator from the bounded operator set. Only admin may call this.
+    ///
+    /// Removing an address that is not in the set is a no-op (idempotent). Not
+    /// gated behind `require_not_paused` — role management is permitted while paused.
+    ///
+    /// # Parameters
+    /// - `admin`: Current administrator. Must authorize this call.
+    /// - `operator`: The address to remove from the operator set.
+    ///
+    /// # Errors
+    /// - [`ContractError::Unauthorized`] if `admin` is not the stored administrator.
+    ///
+    /// # Events
+    /// Publishes `("operator_removed",) → operator` if the address was present.
+    pub fn remove_operator(
+        env: Env,
+        admin: Address,
+        operator: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_admin(&env, &admin)?;
+        let operators: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Operators)
+            .unwrap_or(Vec::new(&env));
+        let mut new_operators = Vec::new(&env);
+        let mut found = false;
+        for op in operators.iter() {
+            if op == operator {
+                found = true;
+            } else {
+                new_operators.push_back(op);
+            }
+        }
+        if found {
+            env.storage()
+                .instance()
+                .set(&DataKey::Operators, &new_operators);
+            env.events()
+                .publish((Symbol::new(&env, "operator_removed"),), operator);
+        }
+        Ok(())
+    }
+
+    /// Returns the full bounded operator set. No auth required (read-only).
+    pub fn get_operators(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Operators)
+            .unwrap_or(Vec::new(&env))
+    }
+
     /// Returns the raw expiry timestamp (seconds since epoch) for `address`, or
     /// `None` if the address has no time-limited allow entry (permanent allow or no allow).
     pub fn get_allow_expiry(env: Env, address: Address) -> Option<u64> {
@@ -1019,17 +1123,28 @@ impl ComplianceContract {
     /// for every tracked address whose `AllowedUntil` has passed, it clears the
     /// `Allowed` flag, removes the expiry, and publishes `("address_allow_expired",) → address`.
     ///
-    /// Returns the number of addresses swept.
+    /// The `limit` parameter caps how many *expired* entries are processed in a
+    /// single invocation so that callers can stay within the Soroban CPU and
+    /// memory budget on large address sets (#596). Pass `0` to sweep all expired
+    /// entries in one call (suitable only for small sets where the full scan fits
+    /// within budget). When `limit > 0`, the caller should invoke `sweep_expired`
+    /// in a loop until it returns `0` to ensure all expired entries are cleared.
+    ///
+    /// Returns the number of addresses swept (i.e. expired entries cleared).
     ///
     /// Not gated behind `require_not_paused`: sweeping only clears already-lapsed
     /// time-bound allows, so it is treated as bookkeeping rather than a new grant
     /// of access, and admins may run it even while paused.
-    pub fn sweep_expired(env: Env, admin: Address) -> Result<u32, ContractError> {
+    pub fn sweep_expired(env: Env, admin: Address, limit: u32) -> Result<u32, ContractError> {
         Self::require_admin(&env, &admin)?;
         let index = Self::address_index(&env);
         let now = env.ledger().timestamp();
         let mut swept = 0u32;
         for addr in index.iter() {
+            // Stop once the caller's requested limit has been reached.
+            if limit > 0 && swept >= limit {
+                break;
+            }
             let allowed: bool = env
                 .storage()
                 .persistent()
@@ -1187,6 +1302,18 @@ impl ComplianceContract {
         if stored_admin == *caller {
             return Ok(());
         }
+        // Check the bounded operator set (multi-operator support, #595).
+        let operators: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Operators)
+            .unwrap_or(Vec::new(env));
+        for op in operators.iter() {
+            if op == *caller {
+                return Ok(());
+            }
+        }
+        // Fallback: also accept the legacy single-operator key for backward compatibility.
         if let Some(operator) = env
             .storage()
             .instance()

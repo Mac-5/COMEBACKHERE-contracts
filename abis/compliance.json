@@ -1,6 +1,7 @@
 {
   "functions": [
     "accept_admin",
+    "add_operator",
     "address_status",
     "allow_address",
     "allow_address_until",
@@ -26,6 +27,7 @@
     "is_blocked",
     "migrate",
     "pause",
+    "remove_operator",
     "revoke_allow",
     "set_jurisdiction",
     "set_operator",

@@ -67,7 +67,7 @@ fn entrypoints_documented_as_permitted_while_paused_are_not_blocked() {
 
     client.set_operator(&new_admin, &Address::generate(&env));
 
-    let swept = client.sweep_expired(&new_admin);
+    let swept = client.sweep_expired(&new_admin, &0);
     assert_eq!(swept, 0);
 }
 
