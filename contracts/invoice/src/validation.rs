@@ -4,6 +4,9 @@ use soroban_sdk::{Address, Env};
 /// Maximum allowed expiry duration: 5 years in seconds.
 pub const MAX_EXPIRY_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
 
+/// Maximum allowed late fee: 1000 basis points (10%).
+pub const MAX_LATE_FEE_BPS: u32 = 1000;
+
 pub fn require_not_paused(env: &Env) -> Result<(), InvoiceError> {
     let paused: bool = env
         .storage()
@@ -45,6 +48,14 @@ pub fn require_usdc_precision(amount_usdc: i128, gross_usdc: i128) -> Result<(),
 pub fn require_expiry_not_too_long(expires_in_seconds: u64) -> Result<(), InvoiceError> {
     if expires_in_seconds > MAX_EXPIRY_SECONDS {
         return Err(InvoiceError::ExpiryTooLong);
+    }
+    Ok(())
+}
+
+/// Reject late_fee_bps values that exceed MAX_LATE_FEE_BPS.
+pub fn require_late_fee_within_bound(late_fee_bps: u32) -> Result<(), InvoiceError> {
+    if late_fee_bps > MAX_LATE_FEE_BPS {
+        return Err(InvoiceError::InvalidLateFee);
     }
     Ok(())
 }

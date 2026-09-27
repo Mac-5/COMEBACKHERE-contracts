@@ -15,6 +15,16 @@ pub const MAX_BATCH_EXPIRE: u32 = 100;
 /// Maximum bytes accepted for optional invoice hash fields.
 pub const MAX_HASH_BYTES: u32 = 64;
 
+/// Basis points denominator: 100% expressed in basis points.
+pub const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Upper bound for the configurable late fee, in basis points (10% = 1_000 bps).
+///
+/// The late fee is applied only when an invoice is paid inside the grace window
+/// after `expires_at`. Values above this bound are rejected at configuration
+/// time so merchants cannot impose an unbounded penalty on late payers.
+pub const MAX_LATE_FEE_BPS: u32 = 1_000;
+
 /// Lifecycle status of an invoice.
 ///
 /// The typical happy path is: `Pending` → `Paid` → `Released`.
@@ -80,6 +90,9 @@ pub struct Invoice {
     /// Optional token contract address for multi-currency invoices.
     /// `None` means the invoice is denominated in the default (USDC).
     pub token_address: MaybeAddress,
+    /// Late fee in basis points applied when the invoice is paid inside the
+    /// grace window after `expires_at`. Bounded by `MAX_LATE_FEE_BPS`.
+    pub late_fee_bps: u32,
 }
 
 /// Parameters for a single invoice within a batch_create_invoice call.
@@ -93,6 +106,8 @@ pub struct BatchInvoiceParams {
     pub payment_link_hash: MaybeBytes,
     pub merchant_nonce: u64,
     pub token_address: MaybeAddress,
+    /// Late fee in basis points applied inside the grace window.
+    pub late_fee_bps: u32,
 }
 
 /// A single status transition recorded in an invoice's audit log.
@@ -134,4 +149,7 @@ pub enum DataKey {
     CreationCooldown,
     /// Timestamp of the last successful create_invoice call for a given merchant.
     LastCreatedAt(Address),
+    /// Default late fee (basis points) applied to invoices created without an
+    /// explicit per-invoice value. Bounded by `MAX_LATE_FEE_BPS`.
+    DefaultLateFeeBps,
 }
