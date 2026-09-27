@@ -17,6 +17,7 @@ pub use invoice::{
     BatchInvoiceParams, DataKey, Invoice, InvoiceError, InvoiceStatus, MaybeAddress, MaybeBytes,
     MAX_BATCH_EXPIRE, MAX_BATCH_SIZE,
 };
+pub use validation::{require_valid_payment_link_hash, MAX_PAYMENT_LINK_HASH_LEN};
 
 use soroban_sdk::{contract, Env, Vec};
 

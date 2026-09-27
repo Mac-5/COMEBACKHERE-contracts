@@ -7,6 +7,9 @@ pub const MAX_EXPIRY_SECONDS: u64 = 5 * 365 * 24 * 60 * 60;
 /// Maximum allowed late fee: 1000 basis points (10%).
 pub const MAX_LATE_FEE_BPS: u32 = 1000;
 
+/// Required length of a payment link hash in bytes.
+pub const PAYMENT_LINK_HASH_BYTES: u32 = 32;
+
 pub fn require_not_paused(env: &Env) -> Result<(), InvoiceError> {
     let paused: bool = env
         .storage()
@@ -71,9 +74,30 @@ pub fn require_hash_not_too_long(hash: &MaybeBytes) -> Result<(), InvoiceError> 
 }
 
 /// Reject a payment_link_hash that is provided but not exactly 32 bytes.
+///
+/// Explicitly rejects empty values, all-zero hashes and oversized inputs so
+/// that invoices cannot be created with a hash that can never be matched to
+/// an off-chain payment link.
 pub fn require_valid_payment_link_hash(hash: &MaybeBytes) -> Result<(), InvoiceError> {
     if let MaybeBytes::Some(bytes) = hash {
-        if bytes.len() != 32 {
+        let len = bytes.len();
+        if len == 0 {
+            return Err(InvoiceError::InvalidPaymentLinkHash);
+        }
+        if len > PAYMENT_LINK_HASH_BYTES {
+            return Err(InvoiceError::InvalidPaymentLinkHash);
+        }
+        if len != PAYMENT_LINK_HASH_BYTES {
+            return Err(InvoiceError::InvalidPaymentLinkHash);
+        }
+        let mut all_zero = true;
+        for i in 0..len {
+            if bytes.get(i).unwrap_or(0) != 0 {
+                all_zero = false;
+                break;
+            }
+        }
+        if all_zero {
             return Err(InvoiceError::InvalidPaymentLinkHash);
         }
     }
