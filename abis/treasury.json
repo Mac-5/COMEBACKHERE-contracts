@@ -26,6 +26,7 @@
     "get_pending_settlements",
     "get_pending_settlements_page",
     "get_settlement",
+    "get_settlement_memo",
     "get_signer_change",
     "get_signer_weight",
     "get_withdrawal_limit",
@@ -53,6 +54,7 @@
     "withdraw_all"
   ],
   "events": [
-    "deposit"
+    "deposit",
+    "settlement_proposed"
   ]
 }

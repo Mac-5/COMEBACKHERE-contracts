@@ -154,6 +154,9 @@ impl TreasuryContract {
 /// Maximum number of tokens allowed in the allowlist to prevent unbounded storage growth.
 pub(crate) const MAX_ALLOWED_TOKENS: u32 = 20;
 
+/// Maximum length (in bytes) of the bounded reference memo attached to a settlement proposal.
+pub(crate) const MAX_SETTLEMENT_MEMO_LEN: u32 = 64;
+
 pub(crate) fn require_admin(env: &Env, admin: &Address) {
     admin.require_auth();
     let stored: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
