@@ -103,6 +103,13 @@ pub struct Invoice {
     /// Optional short memo describing what the invoice is for (e.g. an order
     /// number or one-line description). Length-capped to `MAX_MEMO_BYTES`.
     pub memo: MaybeString,
+    /// Cumulative amount paid so far, in the invoice's denomination.
+    ///
+    /// Starts at 0 and is incremented by `record_partial_payment`. The invoice
+    /// only transitions to `Paid` once this reaches `amount_usdc`. A full
+    /// `mark_paid` sets this to `amount_usdc` so existing integrators observe
+    /// the same final state.
+    pub amount_paid: i128,
 }
 
 /// Parameters for a single invoice within a batch_create_invoice call.
