@@ -46,6 +46,27 @@ impl InvoiceContract {
             }
         }
 
+        // Enforce the per-merchant open invoice limit before writing anything.
+        let open_key = DataKey::MerchantOpenInvoiceCount(merchant.clone());
+        let open_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&open_key)
+            .unwrap_or(0);
+        if let Some(max_open) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::MaxOpenInvoices)
+        {
+            if open_count
+                .checked_add(params.len() as u64)
+                .ok_or(InvoiceError::InvoiceCountOverflow)?
+                > max_open
+            {
+                return Err(InvoiceError::MerchantOpenInvoiceLimitReached);
+            }
+        }
+
         let count: u64 = env
             .storage()
             .instance()
@@ -114,6 +135,12 @@ impl InvoiceContract {
             events::invoice_created(&env, id, &invoice);
             ids.push_back(id);
         }
+
+        // Track the newly opened invoices for this merchant.
+        env.storage()
+            .persistent()
+            .set(&open_key, &(open_count + params.len() as u64));
+
         Ok(ids)
     }
 
@@ -142,6 +169,17 @@ impl InvoiceContract {
                     append_history(&env, id, InvoiceStatus::Pending, InvoiceStatus::Expired);
                     events::invoice_expired(&env, id, &invoice);
                     expired_count += 1;
+
+                    // Decrement the merchant's open invoice count on expiry.
+                    let open_key = DataKey::MerchantOpenInvoiceCount(invoice.merchant.clone());
+                    let open_count: u64 = env
+                        .storage()
+                        .persistent()
+                        .get(&open_key)
+                        .unwrap_or(0);
+                    if open_count > 0 {
+                        env.storage().persistent().set(&open_key, &(open_count - 1));
+                    }
                 }
             }
         }
