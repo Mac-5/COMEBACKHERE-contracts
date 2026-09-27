@@ -58,6 +58,9 @@ pub enum TreasuryError {
     // Appended for `force_cancel_settlement`: the target settlement is already in a
     // terminal state (Executed, Cancelled, Expired) and cannot be force-cancelled.
     ForceCancelNotAllowed = 37,
+    // Appended for `remove_signer` (#563): removing the signer would reduce total
+    // weight below the current threshold, breaking quorum.
+    QuorumBreak = 38,
     // Appended for #447: a timelocked signer/threshold change cannot be executed
     // before its minimum delay has elapsed.
     SignerChangeTooEarly = 38,
@@ -66,6 +69,9 @@ pub enum TreasuryError {
     // Appended for #447: the referenced signer/threshold change has already been
     // executed or cancelled and cannot be acted on again.
     SignerChangeAlreadyFinalised = 40,
+    // Appended for #590: execute_settlement was called after the proposer-set
+    // execution deadline has passed.
+    ExecutionDeadlineExceeded = 41,
 }
 
 // Issue #48: reason codes attached to a held settlement; None means not on hold
@@ -133,6 +139,10 @@ pub struct Settlement {
     pub status: SettlementStatus,
     pub hold_reason: SettlementHoldReason,
     pub proposed_at: u64,
+    /// Optional hard business deadline: if non-zero, `execute_settlement` must
+    /// reject calls after this timestamp even when approvals are complete.
+    /// Set by the proposer at proposal time; `0` means no deadline (default).
+    pub execution_deadline: u64,
 }
 
 #[contracttype]
@@ -248,6 +258,18 @@ pub struct ApprovalExpiry {
     pub expires_at: u64,
 }
 
+/// Nullable `Address` wrapper compatible with `#[contracttype]`.
+///
+/// `Option<Address>` is not supported by the Soroban contract-type macro, so
+/// this enum serves as a manual `Option` for address fields. `None` signals
+/// absence; `Some(addr)` wraps a concrete address.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaybeAddress {
+    None,
+    Some(Address),
+}
+
 /// Storage keys for all treasury contract state.
 ///
 /// Used as keys for Soroban instance and persistent storage. Variants must not
@@ -288,6 +310,10 @@ pub enum DataKey {
     SignerChangeCount,
     /// Persistent storage for a timelocked signer/threshold-change proposal (#447).
     SignerChange(u64),
+    /// Optional UNIX timestamp after which a settlement hold automatically lapses (#592).
+    /// Stored separately from `Settlement` to avoid breaking the ABI snapshot.
+    /// Absent means the hold has no expiry.
+    HoldExpiry(u64),
 }
 
 /// Returns the approval weight assigned to `signer`, or `0` if not registered.
@@ -350,7 +376,8 @@ pub fn require_authorized_signer(env: &Env, signer: &Address) {
 
 /// Adds `signer`'s weight to `weight` and appends `signer` to `approvals`, unless `signer` has
 /// already approved (in which case this is a no-op). Captures the dedup-then-accumulate pattern
-/// used for settlement, dispute, and rotation approvals.
+/// used for settlement, dispute, and rotation approvals. Also records the current ledger timestamp
+/// as the signer's last-active time under `DataKey::SignerLastActive(signer)` (#587).
 ///
 /// # Examples
 ///
@@ -387,6 +414,53 @@ pub fn record_approval(
             .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, TreasuryError::WeightOverflow));
         approvals.push_back(signer.clone());
     }
+    // Always update last-active timestamp, even for duplicate calls, so the
+    // timestamp reflects the most recent approval attempt by this signer.
+    let now = env.ledger().timestamp();
+    env.storage()
+        .instance()
+        .set(&DataKey::SignerLastActive(signer.clone()), &now);
+}
+
+/// Withdraws `signer`'s approval: removes `signer` from `approvals` and subtracts their weight
+/// from `weight`. The inverse of [`record_approval`]. Returns `false` (leaving both untouched)
+/// if `signer` has not approved.
+///
+/// The weight subtracted is `signer`'s *current* weight, mirroring how [`record_approval`] adds
+/// the weight in force at approval time. The subtraction saturates at zero, so if a signer's
+/// weight was raised after they approved the total can never underflow; it can only end up
+/// lower (execution stays blocked) rather than higher.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use soroban_sdk::{Address, Env, Vec};
+/// use multisig::{record_approval, revoke_approval};
+///
+/// # let env: Env = unimplemented!();
+/// # let signer: Address = unimplemented!();
+/// # let mut approvals: Vec<Address> = unimplemented!();
+/// # let mut weight: u32 = 0;
+/// record_approval(&env, &mut approvals, &mut weight, &signer);
+/// // Changed their mind before execution: take the approval back.
+/// assert!(revoke_approval(&env, &mut approvals, &mut weight, &signer));
+/// // Revoking again is a no-op.
+/// assert!(!revoke_approval(&env, &mut approvals, &mut weight, &signer));
+/// ```
+pub fn revoke_approval(
+    env: &Env,
+    approvals: &mut Vec<Address>,
+    weight: &mut u32,
+    signer: &Address,
+) -> bool {
+    match approvals.first_index_of(signer) {
+        Some(index) => {
+            approvals.remove(index);
+            *weight = weight.saturating_sub(signer_weight(env, signer));
+            true
+        }
+        None => false,
+    }
 }
 
 /// Builds expiry metadata for a newly collected approval.
@@ -395,9 +469,9 @@ pub fn approval_expiry(env: &Env, signer: &Address, ttl_seconds: u64) -> Approva
     let expires_at = if ttl_seconds == 0 {
         0
     } else {
-        approved_at
-            .checked_add(ttl_seconds)
-            .unwrap_or_else(|| soroban_sdk::panic_with_error!(env, TreasuryError::ArithmeticOverflow))
+        approved_at.checked_add(ttl_seconds).unwrap_or_else(|| {
+            soroban_sdk::panic_with_error!(env, TreasuryError::ArithmeticOverflow)
+        })
     };
     ApprovalExpiry {
         signer: signer.clone(),

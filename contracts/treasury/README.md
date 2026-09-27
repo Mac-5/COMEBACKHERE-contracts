@@ -156,7 +156,9 @@ sequenceDiagram
 | `propose_settlement` | `signer` | `signer: Address, merchant_address: Address, amount: i128` | `u64` | `ContractPaused`, `UnauthorizedSigner`, `InvalidAmount` |
 | `propose_partial_settlement` | `signer` | `signer: Address, merchant_address: Address, amount: i128` | `u64` | `ContractPaused`, `UnauthorizedSigner`, `InvalidAmount` |
 | `approve_settlement` | `signer` | `signer: Address, settlement_id: u64` | `Settlement` | `ContractPaused`, `UnauthorizedSigner`, `SettlementNotFound`, `AlreadyExecuted` |
+| `revoke_approval` | `signer` | `signer: Address, settlement_id: u64` | `Result<Settlement, TreasuryError>` | `ContractPaused`, `UnauthorizedSigner`, `SettlementNotFound`, `AlreadyExecuted`, `ApprovalNotFound` |
 | `approve_partial_settlement` | `signer` | `signer: Address, settlement_id: u64, partial_amount: i128` | `Settlement` | `ContractPaused`, `UnauthorizedSigner`, `SettlementNotFound`, `AlreadyExecuted`, `InvalidAmount` |
+| `batch_approve_settlements` | `signer` | `signer: Address, ids: Vec<u64>` | `Vec<Settlement>` | `ContractPaused`, `UnauthorizedSigner`, `BatchTooLarge`, `WeightOverflow` |
 | `execute_settlement` | `signer` | `signer: Address, settlement_id: u64, token_contract: Address` | `()` | `ContractPaused`, `UnauthorizedSigner`, `SettlementNotFound`, `SettlementOnHold`, `AlreadyExecuted`, `ThresholdNotConfigured`, `ThresholdNotMet`, `InvalidTokenContract`, `TokenNotAllowed` |
 | `partially_execute_settlement` | `signer` | `signer: Address, settlement_id: u64, partial_amount: i128, token_contract: Address` | `()` | `ContractPaused`, `UnauthorizedSigner`, `SettlementNotFound`, `AlreadyExecuted`, `ThresholdNotConfigured`, `ThresholdNotMet`, `InvalidTokenContract`, `InvalidAmount` |
 | `cancel_settlement` | `signer` | `signer: Address, settlement_id: u64` | `()` | `ContractPaused`, `UnauthorizedSigner`, `SettlementNotFound`, `SettlementNotCancellable` |
@@ -164,7 +166,7 @@ sequenceDiagram
 | `get_pending_settlements` | None | None | `Vec<Settlement>` | None |
 | `get_pending_settlements_page` | None | `start: u64, limit: u64` | `Vec<Settlement>` | None |
 | `get_settlement` | None | `settlement_id: u64` | `Settlement` | `SettlementNotFound` |
-| `update_threshold` | `admin` | `admin: Address, new_threshold: u32` | `Result<(), TreasuryError>` | `Unauthorized`, `ZeroThreshold` |
+| `update_threshold` (**deprecated**, #570 — bypasses the signer-change timelock; use `propose_signer_change`/`execute_signer_change` instead) | `admin` | `admin: Address, new_threshold: u32` | `Result<(), TreasuryError>` | `Unauthorized`, `ZeroThreshold` |
 | `pause` | `admin` | `admin: Address` | `()` | `Unauthorized` |
 | `unpause` | `admin` | `admin: Address` | `()` | `Unauthorized` |
 | `raise_dispute` | `claimant` | `claimant: Address, settlement_id: u64, counterparty: Address, amount: i128` | `u64` | `ContractPaused`, `Unauthorized`, `InvalidAmount` |
@@ -177,7 +179,7 @@ sequenceDiagram
 | `set_withdrawal_limit` | `admin` | `admin: Address, limit: i128, window_secs: u64` | `()` | `Unauthorized` |
 | `get_withdrawal_limit` | None | None | `(i128, u64)` | None |
 | `add_allowed_token` | `admin` | `admin: Address, token: Address` | `()` | `Unauthorized` |
-| `remove_allowed_token` | `admin` | `admin: Address, token: Address` | `()` | `Unauthorized` |
+| `remove_allowed_token` | `admin` | `admin: Address, token: Address` | `()` | `Unauthorized`, `TokenHasPendingSettlements` |
 | `get_balance` | None | `address: Address, token_contract: Address` | `i128` | None |
 | `get_allowed_tokens` | None | None | `Vec<Address>` | None |
 | `propose_signer_rotation` | `proposer` | `proposer: Address, old_signer: Address, new_signer: Address` | `u64` | `UnauthorizedSigner` |
@@ -186,6 +188,28 @@ sequenceDiagram
 | `get_merchant_payout_address` | None | `merchant: Address` | `Option<Address>` | None |
 | `hold_settlement` | `admin` | `admin: Address, settlement_id: u64, reason: SettlementHoldReason` | `()` | `Unauthorized`, `SettlementNotFound`, `AlreadyExecuted` |
 | `release_hold` | `admin` | `admin: Address, settlement_id: u64` | `()` | `Unauthorized`, `SettlementNotFound`, `NotOnHold` |
+
+## `batch_approve_settlements` skip semantics
+
+`batch_approve_settlements` accepts a list of settlement IDs and approves each
+`Pending` one in a single transaction. IDs that cannot be approved are **silently
+skipped** rather than aborting the batch — a single bad ID never rolls back the
+approvals already recorded for valid IDs.
+
+The following ID categories are skipped without error:
+
+| Category | Settlement status | Notes |
+|----------|------------------|-------|
+| Unknown ID | *(no record exists)* | The ID was never proposed or has been pruned. |
+| Already executed | `Executed` or `PartiallyExecuted` | The settlement has been paid out. |
+| Expired | `Expired` | The settlement TTL elapsed before it was executed. |
+| Cancelled | `Cancelled` | An admin or signer cancelled the settlement. |
+| On hold | `OnHold` | Blocked by an open dispute; cannot be approved until released. |
+
+**Integrator guidance**: integrators can safely resubmit a partially-failed or
+stale batch. The returned `Vec<Settlement>` contains exactly the settlements that
+were approved in *this* call; previously-approved IDs in the same signer's list
+are deduplicated (no double-count of weight) and produce no error.
 
 ## CLI usage examples
 
@@ -244,6 +268,22 @@ stellar contract invoke \
 ```
 
 ---
+
+## Revoking a settlement approval (#577)
+
+A signer who has approved a `Pending` settlement can withdraw that approval with `revoke_approval(signer, settlement_id)` any time before the settlement is executed. The signer's weight is subtracted from the settlement's `approval_weight`; if that drops the total below the threshold, `execute_settlement` fails with `ThresholdNotMet` again until enough approvals are re-collected. The call fails with `ApprovalNotFound` if `signer` has not approved, and with `AlreadyExecuted` once the settlement is no longer `Pending`. Each revocation emits `settlement_approval_revoked` so other signers and indexers are informed.
+
+The weight subtracted is the signer's *current* weight (the counterpart of `record_approval`, which adds the weight in force at approval time), saturating at zero. If a signer's weight was changed with `set_signer` after they approved, re-check `approval_weight` on the returned `Settlement`.
+
+## Removing an allowed token (#567)
+
+`remove_allowed_token` refuses to remove a token that is on the allowlist while any settlement is still `Pending`, failing with `TokenHasPendingSettlements`. A settlement does not record which token it will be paid in (the token is passed to `execute_settlement`), so every `Pending` settlement is treated as potentially depending on every allowlisted token. Removing a token that is not on the allowlist is unaffected.
+
+Recommended order of operations for operators retiring a token:
+
+1. Stop proposing new settlements that will be paid in that token.
+2. Resolve every pending settlement: execute it, `cancel_settlement` it, or let it be expired (`expire_settlement`). Use `get_pending_settlements` / `get_pending_metrics` to confirm none remain.
+3. Call `remove_allowed_token`.
 
 ## Multi-token deposit accounting (#448)
 

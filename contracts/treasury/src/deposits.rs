@@ -100,6 +100,29 @@ impl TreasuryContract {
             .unwrap_or(0)
     }
 
+    /// Returns `address`'s recorded deposit balance for every currently-allowed
+    /// token in a single call (#566), as `(token_contract, balance)` pairs.
+    ///
+    /// Solves the dashboard/health-script problem of making one `get_balance`
+    /// call per token — which is slow and can observe an inconsistent snapshot
+    /// if a deposit lands between calls. The output is bounded by the allowed
+    /// token list (capped at `MAX_ALLOWED_TOKENS`), so this can never exceed its
+    /// budget regardless of how many tokens are allowed.
+    /// Read-only, no authentication required.
+    pub fn get_all_balances(env: Env, address: Address) -> Vec<(Address, i128)> {
+        let tokens = TreasuryContract::get_allowed_tokens(env.clone());
+        let mut result = Vec::new(&env);
+        for token_contract in tokens.iter() {
+            let balance: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Balance(address.clone(), token_contract.clone()))
+                .unwrap_or(0);
+            result.push_back((token_contract, balance));
+        }
+        result
+    }
+
     /// Drains the full token balance of the treasury to `recipient` (admin-only, paused-only emergency drain).
     /// Errors: `NotPaused`.
     /// Panics: `Unauthorized`.
