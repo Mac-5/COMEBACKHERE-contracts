@@ -70,6 +70,8 @@ pub struct Invoice {
     pub amount_usdc: i128,
     pub gross_usdc: i128,
     pub status: InvoiceStatus,
+    /// Ledger timestamp at creation, sourced from `env.ledger().timestamp()`.
+    pub created_at: u64,
     pub expires_at: u64,
     pub paid_at: Option<u64>,
     pub payer: MaybeAddress,

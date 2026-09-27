@@ -55,6 +55,7 @@ impl InvoiceContract {
             .checked_add(params.len() as u64)
             .ok_or(InvoiceError::InvoiceCountOverflow)?;
 
+        let created_at = env.ledger().timestamp();
         let mut ids = Vec::new(&env);
         for p in params.iter() {
             let count: u64 = env
@@ -65,9 +66,7 @@ impl InvoiceContract {
             let id = count
                 .checked_add(1)
                 .ok_or(InvoiceError::InvoiceCountOverflow)?;
-            let expires_at = env
-                .ledger()
-                .timestamp()
+            let expires_at = created_at
                 .checked_add(p.expires_in_seconds)
                 .ok_or(InvoiceError::ExpiryOverflow)?;
             let invoice = Invoice {
@@ -76,6 +75,7 @@ impl InvoiceContract {
                 amount_usdc: p.amount_usdc,
                 gross_usdc: p.gross_usdc,
                 status: InvoiceStatus::Pending,
+                created_at,
                 expires_at,
                 paid_at: None,
                 payer: MaybeAddress::None,
