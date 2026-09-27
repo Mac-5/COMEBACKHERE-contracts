@@ -1,4 +1,4 @@
-use crate::invoice::{DataKey, InvoiceError, MaybeBytes, MAX_HASH_BYTES, USDC_FACTOR};
+use crate::invoice::{DataKey, InvoiceError, MaybeBytes, MAX_HASH_BYTES, MAX_MEMO_BYTES, USDC_FACTOR};
 use soroban_sdk::{Address, Env};
 
 /// Maximum allowed expiry duration: 5 years in seconds.
@@ -64,6 +64,16 @@ pub fn require_valid_payment_link_hash(hash: &MaybeBytes) -> Result<(), InvoiceE
     if let MaybeBytes::Some(bytes) = hash {
         if bytes.len() != 32 {
             return Err(InvoiceError::InvalidPaymentLinkHash);
+        }
+    }
+    Ok(())
+}
+
+/// Reject an optional memo that exceeds the storage/cost cap.
+pub fn require_memo_not_too_long(memo: &Option<String>) -> Result<(), InvoiceError> {
+    if let Some(m) = memo {
+        if m.len() > MAX_MEMO_BYTES {
+            return Err(InvoiceError::MemoTooLong);
         }
     }
     Ok(())

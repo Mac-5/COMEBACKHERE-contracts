@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes};
+use soroban_sdk::{contracttype, Address, Bytes, String};
 
 pub use invoice_errors::InvoiceError;
 
@@ -14,6 +14,13 @@ pub const MAX_BATCH_EXPIRE: u32 = 100;
 
 /// Maximum bytes accepted for optional invoice hash fields.
 pub const MAX_HASH_BYTES: u32 = 64;
+
+/// Maximum bytes accepted for the optional invoice memo field.
+///
+/// The memo is stored in persistent storage, so every byte costs rent; this
+/// cap keeps storage costs predictable and is documented in
+/// `docs/economic-parameters.md`.
+pub const MAX_MEMO_BYTES: u32 = 128;
 
 /// Lifecycle status of an invoice.
 ///
@@ -62,6 +69,19 @@ pub enum MaybeBytes {
     Some(Bytes),
 }
 
+/// Nullable `String` wrapper compatible with `#[contracttype]`.
+///
+/// `Option<String>` is not supported by the Soroban contract-type macro, so
+/// this enum serves as a manual `Option` for string fields such as the
+/// optional invoice memo. `None` signals absence; `Some(string)` wraps a
+/// concrete string.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaybeString {
+    None,
+    Some(String),
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Invoice {
@@ -80,6 +100,9 @@ pub struct Invoice {
     /// Optional token contract address for multi-currency invoices.
     /// `None` means the invoice is denominated in the default (USDC).
     pub token_address: MaybeAddress,
+    /// Optional short memo describing what the invoice is for (e.g. an order
+    /// number or one-line description). Length-capped to `MAX_MEMO_BYTES`.
+    pub memo: MaybeString,
 }
 
 /// Parameters for a single invoice within a batch_create_invoice call.
@@ -93,6 +116,8 @@ pub struct BatchInvoiceParams {
     pub payment_link_hash: MaybeBytes,
     pub merchant_nonce: u64,
     pub token_address: MaybeAddress,
+    /// Optional short memo describing what the invoice is for.
+    pub memo: MaybeString,
 }
 
 /// A single status transition recorded in an invoice's audit log.
