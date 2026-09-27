@@ -1,12 +1,15 @@
 use crate::{require_admin, require_not_paused, DataKey, TreasuryContract, TreasuryError};
 #[allow(unused_imports)]
 use crate::{TreasuryContractArgs, TreasuryContractClient};
-use soroban_sdk::{contractimpl, token, Address, Env, Symbol, Vec};
+use soroban_sdk::{contractimpl, token, Address, Bytes, Env, Symbol, Vec};
 use multisig::signer_weight;
 
 #[contractimpl]
 impl TreasuryContract {
     /// Deposits `amount` tokens from `from` into the treasury via `token_contract`.
+    /// An optional `reference` string can be supplied for off-chain reconciliation;
+    /// it is included in the `deposit` event so finance systems can match deposits
+    /// to invoices or external transfers automatically.
     /// Errors: `ContractPaused`, `InvalidAmount`.
     /// Emits: `deposit`.
     pub fn deposit(
@@ -14,24 +17,28 @@ impl TreasuryContract {
         from: Address,
         token_contract: Address,
         amount: i128,
+        reference: Option<Bytes>,
     ) -> Result<(), TreasuryError> {
         require_not_paused(&env);
         from.require_auth();
-        deposit_one(&env, &from, &token_contract, amount)
+        deposit_one(&env, &from, &token_contract, amount, reference)
     }
 
     /// Deposits multiple `(token_contract, amount)` pairs from `from` into the treasury.
+    /// An optional `reference` string is forwarded to every `deposit` event emitted
+    /// by the batch, allowing the whole batch to be tagged with a single reconciliation id.
     /// Errors: `ContractPaused`, `InvalidAmount`.
     /// Emits: `deposit` for each deposited token.
     pub fn batch_deposit(
         env: Env,
         from: Address,
         deposits: Vec<(Address, i128)>,
+        reference: Option<Bytes>,
     ) -> Result<(), TreasuryError> {
         require_not_paused(&env);
         from.require_auth();
         for (token_contract, amount) in deposits.iter() {
-            deposit_one(&env, &from, &token_contract, amount)?;
+            deposit_one(&env, &from, &token_contract, amount, reference.clone())?;
         }
         Ok(())
     }
@@ -208,6 +215,7 @@ fn deposit_one(
     from: &Address,
     token_contract: &Address,
     amount: i128,
+    reference: Option<Bytes>,
 ) -> Result<(), TreasuryError> {
     if amount <= 0 {
         return Err(TreasuryError::InvalidAmount);
@@ -227,8 +235,12 @@ fn deposit_one(
         &DataKey::Balance(from.clone(), token_contract.clone()),
         &balance,
     );
-    env.events()
-        .publish((Symbol::new(env, "deposit"), from.clone()), amount);
+    // Include the optional reference in the event data so off-chain systems can
+    // match deposits to invoices or external transfers without manual look-up.
+    env.events().publish(
+        (Symbol::new(env, "deposit"), from.clone()),
+        (amount, reference),
+    );
     Ok(())
 }
 
