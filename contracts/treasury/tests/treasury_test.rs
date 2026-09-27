@@ -192,7 +192,7 @@ fn dispute_can_be_raised_against_settlement() {
     let settlement_id = client.propose_settlement(&signer, &merchant, &10_000_000);
 
     let dispute_id =
-        client.raise_dispute(&claimant, &settlement_id, &merchant, &5_000_000, &u64::MAX);
+        client.raise_dispute(&claimant, &settlement_id, &merchant, &5_000_000, &u64::MAX, &None);
     assert_eq!(dispute_id, 1);
 }
 
@@ -211,7 +211,7 @@ fn dispute_resolved_in_favor_of_claimant() {
 
     let settlement_id = client.propose_settlement(&signer, &merchant, &10_000_000);
     let dispute_id =
-        client.raise_dispute(&claimant, &settlement_id, &merchant, &5_000_000, &u64::MAX);
+        client.raise_dispute(&claimant, &settlement_id, &merchant, &5_000_000, &u64::MAX, &None);
 
     client.resolve_dispute(&admin, &dispute_id, &true);
 }
@@ -231,7 +231,7 @@ fn dispute_resolved_in_favor_of_counterparty() {
 
     let settlement_id = client.propose_settlement(&signer, &merchant, &10_000_000);
     let dispute_id =
-        client.raise_dispute(&claimant, &settlement_id, &merchant, &5_000_000, &u64::MAX);
+        client.raise_dispute(&claimant, &settlement_id, &merchant, &5_000_000, &u64::MAX, &None);
 
     client.resolve_dispute(&admin, &dispute_id, &false);
 }

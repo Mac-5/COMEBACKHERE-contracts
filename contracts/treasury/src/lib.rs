@@ -149,6 +149,29 @@ impl TreasuryContract {
             .unwrap_or(0);
         (limit, window_secs)
     }
+
+    /// Pins the compliance contract instance `propose_settlement` consults (admin-only,
+    /// #571). Optional and freely updatable: a treasury that never calls this keeps its
+    /// pre-#571 behavior of not gating proposals on compliance at all — this is what
+    /// `compliance_block_between_proposal_execution_test.rs` relies on, since it tests
+    /// the *execution*-time gate via a separate workflow contract, not this one.
+    /// Emits: `compliance_id_set`.
+    pub fn set_compliance_id(env: Env, admin: Address, compliance_id: Address) {
+        require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::ComplianceId, &compliance_id);
+        env.events().publish(
+            (Symbol::new(&env, "compliance_id_set"),),
+            compliance_id,
+        );
+    }
+
+    /// Returns the pinned compliance contract instance, or `None` if proposals are
+    /// not currently gated on compliance.
+    pub fn get_compliance_id(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::ComplianceId)
+    }
 }
 
 /// Maximum number of tokens allowed in the allowlist to prevent unbounded storage growth.
@@ -170,6 +193,43 @@ pub(crate) fn require_not_paused(env: &Env) {
         .unwrap_or(false);
     if paused {
         soroban_sdk::panic_with_error!(env, TreasuryError::ContractPaused);
+    }
+}
+
+/// Writes `settlement` to storage and keeps `DataKey::PendingSettlementIndex` in sync
+/// with its `status` (#572). This is the *only* place a `Settlement` should be persisted
+/// in this crate — every write site (propose, approve, execute, cancel, expire, hold,
+/// dispute-driven hold/release, force-cancel) goes through here so the index can never
+/// drift from what `settlement.status == Pending` actually says, without having to
+/// duplicate that add/remove bookkeeping at each call site individually.
+pub(crate) fn write_settlement(env: &Env, id: u64, settlement: &Settlement) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Settlement(id), settlement);
+
+    let mut index: Vec<u64> = env
+        .storage()
+        .instance()
+        .get(&DataKey::PendingSettlementIndex)
+        .unwrap_or_else(|| Vec::new(env));
+    let is_pending = settlement.status == SettlementStatus::Pending;
+    let already_indexed = index.contains(&id);
+
+    if is_pending && !already_indexed {
+        index.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingSettlementIndex, &index);
+    } else if !is_pending && already_indexed {
+        let mut updated = Vec::new(env);
+        for existing in index.iter() {
+            if existing != id {
+                updated.push_back(existing);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingSettlementIndex, &updated);
     }
 }
 

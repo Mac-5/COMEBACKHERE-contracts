@@ -1,6 +1,6 @@
 use crate::{
-    require_admin, DataKey, Settlement, SettlementHoldReason, SettlementStatus, TreasuryContract,
-    TreasuryContractArgs, TreasuryContractClient, TreasuryError,
+    require_admin, write_settlement, DataKey, Settlement, SettlementHoldReason, SettlementStatus,
+    TreasuryContract, TreasuryContractArgs, TreasuryContractClient, TreasuryError,
 };
 use soroban_sdk::{contractimpl, Address, Env, Symbol};
 
@@ -30,9 +30,7 @@ impl TreasuryContract {
         }
         settlement.status = SettlementStatus::OnHold;
         settlement.hold_reason = reason.clone();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (Symbol::new(&env, "settlement_held"), settlement_id),
             reason,
@@ -70,9 +68,7 @@ impl TreasuryContract {
         }
         settlement.status = SettlementStatus::Pending;
         settlement.hold_reason = SettlementHoldReason::None;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (Symbol::new(&env, "settlement_released"), settlement_id),
             settlement,

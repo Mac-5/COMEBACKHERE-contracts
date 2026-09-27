@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contracterror, contracttype, Address, Env, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env, Vec};
 
 /// Error codes for all treasury contract operations. Variants are append-only
 /// and must never be renumbered, as discriminants are stored on-chain and
@@ -66,6 +66,8 @@ pub enum TreasuryError {
     // Appended for #447: the referenced signer/threshold change has already been
     // executed or cancelled and cannot be acted on again.
     SignerChangeAlreadyFinalised = 40,
+    // Appended for #573: a signer already voted on this dispute and cannot vote again.
+    DuplicateVote = 41,
 }
 
 // Issue #48: reason codes attached to a held settlement; None means not on hold
@@ -151,6 +153,11 @@ pub struct Dispute {
     /// Claimant's share of `amount` in basis points (0..=10_000), set when `status` is
     /// `ResolvedSplit`; meaningless (always 0) for every other status. See #456.
     pub claimant_share_bps: u32,
+    /// Optional 32-byte hash of an off-chain evidence bundle (screenshots, messages,
+    /// delivery proof) supporting the dispute (#574). `None` when the claimant supplied
+    /// none. Purely a verifiable pointer for signers/audits — never itself verified
+    /// on-chain.
+    pub evidence_hash: Option<BytesN<32>>,
 }
 
 /// Lifecycle state of a signer-rotation proposal.
@@ -288,6 +295,15 @@ pub enum DataKey {
     SignerChangeCount,
     /// Persistent storage for a timelocked signer/threshold-change proposal (#447).
     SignerChange(u64),
+    /// Compact index of settlement ids currently in `Pending` status (#572), kept in
+    /// sync on every settlement write so `get_pending_settlements` and friends cost
+    /// proportional to the pending set rather than total settlement history.
+    PendingSettlementIndex,
+    /// Optional pinned compliance contract instance (#571), consulted by
+    /// `propose_settlement` when set. Unset means treasury does not gate proposals
+    /// on compliance at all — the pre-#571 behavior, and what every treasury
+    /// instance that never calls `set_compliance_id` keeps.
+    ComplianceId,
 }
 
 /// Returns the approval weight assigned to `signer`, or `0` if not registered.
