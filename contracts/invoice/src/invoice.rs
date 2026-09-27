@@ -95,6 +95,31 @@ pub struct Invoice {
     pub late_fee_bps: u32,
 }
 
+/// Lightweight, read-only projection of an [`Invoice`] for list views.
+///
+/// Contains only the fields frontends need when enumerating many invoices:
+/// id, status, amount and expiry. It is derived from the same storage record
+/// as `get_invoice` (never a duplicated copy), so it can never go out of sync.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceSummary {
+    pub id: u64,
+    pub status: InvoiceStatus,
+    pub amount_usdc: i128,
+    pub expires_at: u64,
+}
+
+impl From<&Invoice> for InvoiceSummary {
+    fn from(invoice: &Invoice) -> Self {
+        InvoiceSummary {
+            id: invoice.id,
+            status: invoice.status.clone(),
+            amount_usdc: invoice.amount_usdc,
+            expires_at: invoice.expires_at,
+        }
+    }
+}
+
 /// Parameters for a single invoice within a batch_create_invoice call.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

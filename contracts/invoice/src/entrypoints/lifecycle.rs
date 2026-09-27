@@ -6,7 +6,7 @@ use crate::validation::{
 use crate::{append_history, pending_index_add, pending_index_remove};
 use crate::{
     DataKey, Invoice, InvoiceContract, InvoiceContractArgs, InvoiceContractClient, InvoiceError,
-    InvoiceStatus, MaybeAddress, MaybeBytes,
+    InvoiceStatus, InvoiceSummary, MaybeAddress, MaybeBytes,
 };
 use soroban_sdk::{contractimpl, Address, Env, Vec};
 
@@ -111,6 +111,24 @@ impl InvoiceContract {
         pending_index_add(&env, id);
         events::invoice_created(&env, id, &invoice);
         Ok(id)
+    }
+
+    /// #558: lightweight invoice view returning only the essentials
+    /// (id, status, amount and expiry) for list views. Reads from the same
+    /// `DataKey::Invoice` storage as `get_invoice`, so it can never go out of
+    /// sync with the full record.
+    pub fn get_invoice_summary(env: Env, id: u64) -> Result<InvoiceSummary, InvoiceError> {
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .ok_or(InvoiceError::NotFound)?;
+        Ok(InvoiceSummary {
+            id: invoice.id,
+            status: invoice.status,
+            amount_usdc: invoice.amount_usdc,
+            expires_at: invoice.expires_at,
+        })
     }
 
     /// #556: configure the late fee (in basis points) applied to payments
@@ -240,44 +258,7 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
         append_history(&env, id, InvoiceStatus::Paid, InvoiceStatus::Released);
-        events::escrow_released(&env, id, &invoice);
+        events::invoice_released(&env, id, &invoice);
         Ok(())
     }
-
-    pub fn get_invoice(env: Env, id: u64) -> Result<Invoice, InvoiceError> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .ok_or(InvoiceError::NotFound)
-    }
-
-    pub fn get_invoice_status(env: Env, id: u64) -> Result<InvoiceStatus, InvoiceError> {
-        let invoice: Invoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .ok_or(InvoiceError::NotFound)?;
-        Ok(invoice.status)
-    }
-
-    /// Return one status result per ID, preserving input order.
-    pub fn batch_get_invoice_status(
-        env: Env,
-        ids: Vec<u64>,
-    ) -> Vec<Result<InvoiceStatus, InvoiceError>> {
-        let mut statuses = Vec::new(&env);
-        for id in ids.iter() {
-            statuses.push_back(Self::get_invoice_status(env.clone(), id));
-        }
-        statuses
-    }
-
-    /// Return up to `limit` invoices starting at `start_id` (inclusive).
-    /// Gaps (IDs with no stored invoice) are skipped.
-    pub fn get_invoices_page(env: Env, start_id: u64, limit: u64) -> Vec<Invoice> {
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::InvoiceCo
-
-/* … truncated 7703 chars — edit only what you need near the top … */
+}
