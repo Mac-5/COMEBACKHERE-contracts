@@ -97,6 +97,11 @@ pub struct Invoice {
     pub payment_link_hash: MaybeBytes,
     /// Merchant-supplied nonce for storefront idempotency (0 = no nonce).
     pub merchant_nonce: u64,
+    /// Token contract address the invoice is denominated in.
+    ///
+    /// Defaults to the configured USDC token when callers do not pass one,
+    /// preserving backwards compatibility for existing invoices and callers.
+    pub token: Address,
     /// Optional token contract address for multi-currency invoices.
     /// `None` means the invoice is denominated in the default (USDC).
     pub token_address: MaybeAddress,
@@ -166,4 +171,6 @@ pub enum DataKey {
     CreationCooldown,
     /// Timestamp of the last successful create_invoice call for a given merchant.
     LastCreatedAt(Address),
+    /// Configured default token (USDC) address used when callers omit a token.
+    DefaultToken,
 }

@@ -17,6 +17,10 @@ impl InvoiceContract {
     /// Create an invoice with an optional merchant-supplied nonce for idempotency.
     /// Pass `merchant_nonce = 0` to skip nonce enforcement.
     /// A non-zero nonce that has already been used for this merchant is rejected.
+    ///
+    /// #531: `token_address` stores the asset identifier for the invoice.
+    /// When omitted, the configured USDC token is used for backwards
+    /// compatibility.
     #[allow(clippy::too_many_arguments)]
     pub fn create_invoice(
         env: Env,
@@ -32,8 +36,20 @@ impl InvoiceContract {
         merchant.require_auth();
         require_not_paused(&env)?;
         require_positive_amount(amount_usdc, gross_usdc)?;
-        // #57: USDC decimal precision guardrail
-        require_usdc_precision(amount_usdc, gross_usdc)?;
+
+        // #531: resolve the invoice token, defaulting to the configured USDC
+        // address so existing callers that omit a token keep working.
+        let token: Address = match token_address {
+            MaybeAddress::Some(addr) => addr,
+            MaybeAddress::None => env
+                .storage()
+                .instance()
+                .get(&DataKey::UsdcToken)
+                .ok_or(InvoiceError::NotInitialized)?,
+        };
+
+        // #57: token-aware decimal precision guardrail
+        require_usdc_precision(&env, &token, amount_usdc, gross_usdc)?;
         require_hash_not_too_long(&metadata_hash)?;
         require_hash_not_too_long(&payment_link_hash)?;
         // #16: payment_link_hash must be exactly 32 bytes when provided
@@ -83,7 +99,7 @@ impl InvoiceContract {
             metadata_hash,
             payment_link_hash,
             merchant_nonce,
-            token_address,
+            token_address: MaybeAddress::Some(token),
             amount_paid: 0,
         };
 
@@ -229,92 +245,6 @@ impl InvoiceContract {
         let new_total = invoice
             .amount_paid
             .checked_add(amount)
-            .ok_or(InvoiceError::AmountOverflow)?;
-        if new_total > invoice.amount_usdc {
-            return Err(InvoiceError::Overpayment);
-        }
+            .ok_or(InvoiceError::Amoun
 
-        invoice.amount_paid = new_total;
-        invoice.payer = MaybeAddress::Some(payer);
-
-        if new_total == invoice.amount_usdc {
-            invoice.status = InvoiceStatus::Paid;
-            invoice.paid_at = Some(env.ledger().timestamp());
-            env.storage()
-                .persistent()
-                .set(&DataKey::Invoice(id), &invoice);
-            pending_index_remove(&env, id);
-            append_history(&env, id, InvoiceStatus::Pending, InvoiceStatus::Paid);
-            events::invoice_paid(&env, id, &invoice);
-        } else {
-            env.storage()
-                .persistent()
-                .set(&DataKey::Invoice(id), &invoice);
-            events::invoice_partially_paid(&env, id, &invoice, amount);
-        }
-        Ok(())
-    }
-
-    // --- #56: escrow release entrypoint ---
-
-    /// Release escrow for a paid invoice. Admin-only. Transitions Paid → Released.
-    pub fn release_escrow(env: Env, admin: Address, id: u64) -> Result<(), InvoiceError> {
-        require_admin(&env, &admin)?;
-        require_not_paused(&env)?;
-
-        let mut invoice: Invoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .ok_or(InvoiceError::NotFound)?;
-
-        if invoice.status != InvoiceStatus::Paid {
-            return Err(InvoiceError::NotPaid);
-        }
-
-        invoice.status = InvoiceStatus::Released;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Invoice(id), &invoice);
-        append_history(&env, id, InvoiceStatus::Paid, InvoiceStatus::Released);
-        events::escrow_released(&env, id, &invoice);
-        Ok(())
-    }
-
-    pub fn get_invoice(env: Env, id: u64) -> Result<Invoice, InvoiceError> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .ok_or(InvoiceError::NotFound)
-    }
-
-    pub fn get_invoice_status(env: Env, id: u64) -> Result<InvoiceStatus, InvoiceError> {
-        let invoice: Invoice = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Invoice(id))
-            .ok_or(InvoiceError::NotFound)?;
-        Ok(invoice.status)
-    }
-
-    /// Return one status result per ID, preserving input order.
-    pub fn batch_get_invoice_status(
-        env: Env,
-        ids: Vec<u64>,
-    ) -> Vec<Result<InvoiceStatus, InvoiceError>> {
-        let mut statuses = Vec::new(&env);
-        for id in ids.iter() {
-            statuses.push_back(Self::get_invoice_status(env.clone(), id));
-        }
-        statuses
-    }
-
-    /// Return up to `limit` invoices starting at `start_id` (inclusive).
-    /// Gaps (IDs with no stored invoice) are skipped.
-    pub fn get_invoices_page(env: Env, start_id: u64, limit: u64) -> Vec<Invoice> {
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::InvoiceCo
-
-/* … truncated 7703 chars — edit only what you need near the top … */
+/* … truncated 3061 chars — edit only what you need near the top … */

@@ -32,10 +32,34 @@ pub fn require_positive_amount(amount_usdc: i128, gross_usdc: i128) -> Result<()
     Ok(())
 }
 
-/// Reject amounts below the minimum USDC unit (1 USDC = USDC_FACTOR stroops).
+/// Resolve the number of decimal places for a token, defaulting to the
+/// configured USDC token's decimals (6) when the token is not registered.
+fn token_decimals(env: &Env, token: &Address) -> u32 {
+    let usdc: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::UsdcToken)
+        .unwrap_or_else(|| token.clone());
+    if *token == usdc {
+        6
+    } else {
+        env.storage()
+            .instance()
+            .get(&DataKey::TokenDecimals(token.clone()))
+            .unwrap_or(6)
+    }
+}
+
+/// Reject amounts below the minimum unit for the invoice's token.
 /// This guards against off-by-factor errors (e.g., passing dollar cents instead of stroops).
-pub fn require_usdc_precision(amount_usdc: i128, gross_usdc: i128) -> Result<(), InvoiceError> {
-    if amount_usdc < USDC_FACTOR || gross_usdc < USDC_FACTOR {
+pub fn require_usdc_precision(
+    env: &Env,
+    token: &Address,
+    amount_usdc: i128,
+    gross_usdc: i128,
+) -> Result<(), InvoiceError> {
+    let factor = 10i128.pow(token_decimals(env, token));
+    if amount_usdc < factor || gross_usdc < factor {
         return Err(InvoiceError::AmountPrecision);
     }
     Ok(())
