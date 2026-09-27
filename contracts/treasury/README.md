@@ -2,6 +2,151 @@
 
 The Treasury contract manages funds and settlements using a multi-signature approval process. It supports settlement proposals, partial settlements, disputes, and signer rotations.
 
+---
+
+## Flow Diagrams
+
+The sequence diagrams below describe the primary flows supported by the treasury. Each diagram uses the actors that call the on-chain entrypoints and shows which events are emitted.
+
+### 1. Proposal and Approval Flow
+
+A signer proposes a settlement; one or more signers approve it; once cumulative weight meets the threshold a signer executes it.
+
+```mermaid
+sequenceDiagram
+    actor Signer1
+    actor Signer2
+    participant Treasury
+
+    Signer1->>Treasury: propose_settlement(signer, merchant, amount)
+    Treasury-->>Signer1: settlement_id
+    Note over Treasury: status = Pending<br/>approval_weight = signer1_weight
+    Treasury--)Signer1: event: settlement_proposed
+
+    Signer2->>Treasury: approve_settlement(signer2, settlement_id)
+    Treasury-->>Signer2: Settlement
+    Note over Treasury: approval_weight += signer2_weight
+    Treasury--)Signer2: event: settlement_approved
+
+    Signer1->>Treasury: execute_settlement(signer1, settlement_id, token)
+    Note over Treasury: Checks approval_weight >= threshold
+    Treasury->>Treasury: token.transfer(treasury → merchant)
+    Note over Treasury: status = Executed
+    Treasury--)Signer1: event: settlement_executed
+```
+
+### 2. Partial Execution Flow
+
+A signer proposes a settlement and a partial amount is approved and transferred instead of the full amount.
+
+```mermaid
+sequenceDiagram
+    actor Signer1
+    actor Signer2
+    participant Treasury
+
+    Signer1->>Treasury: propose_partial_settlement(signer1, merchant, amount)
+    Treasury-->>Signer1: settlement_id
+    Treasury--)Signer1: event: settlement_proposed
+
+    Signer2->>Treasury: approve_partial_settlement(signer2, settlement_id, partial_amount)
+    Treasury-->>Signer2: Settlement
+    Treasury--)Signer2: event: settlement_partial_approved
+
+    Signer1->>Treasury: partially_execute_settlement(signer1, settlement_id, partial_amount, token)
+    Note over Treasury: Checks approval_weight >= threshold
+    Treasury->>Treasury: token.transfer(treasury → merchant, partial_amount)
+    Note over Treasury: status = PartiallyExecuted
+    Treasury--)Signer1: event: settlement_partial_executed
+```
+
+### 3. Hold Flow
+
+An admin places a settlement on hold (e.g. for compliance review) and later releases it so it can proceed.
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    actor Signer
+    participant Treasury
+
+    Signer->>Treasury: propose_settlement(signer, merchant, amount)
+    Treasury-->>Signer: settlement_id
+    Treasury--)Signer: event: settlement_proposed
+
+    Admin->>Treasury: hold_settlement(admin, settlement_id, ComplianceReview)
+    Note over Treasury: status = OnHold<br/>hold_reason = ComplianceReview
+    Treasury--)Admin: event: settlement_held
+
+    Note over Admin: Off-chain review completes
+
+    Admin->>Treasury: release_hold(admin, settlement_id)
+    Note over Treasury: status = Pending<br/>hold_reason = None
+    Treasury--)Admin: event: settlement_released
+
+    Signer->>Treasury: execute_settlement(signer, settlement_id, token)
+    Treasury->>Treasury: token.transfer(treasury → merchant)
+    Note over Treasury: status = Executed
+    Treasury--)Signer: event: settlement_executed
+```
+
+### 4. Dispute Flow
+
+A claimant raises a dispute on a pending settlement; signers vote on the resolution; once threshold is met the dispute is resolved and the settlement hold is lifted.
+
+```mermaid
+sequenceDiagram
+    actor Claimant
+    actor Signer1
+    actor Signer2
+    actor Admin
+    participant Treasury
+
+    Claimant->>Treasury: raise_dispute(claimant, settlement_id, counterparty, amount, expires_at)
+    Treasury-->>Claimant: dispute_id
+    Note over Treasury: settlement status = OnHold<br/>dispute status = Raised
+    Treasury--)Claimant: event: dispute_raised
+
+    Signer1->>Treasury: vote_dispute_resolution(signer1, dispute_id, in_favor_of_claimant=true)
+    Treasury--)Signer1: event: dispute_resolution_voted
+
+    Signer2->>Treasury: vote_dispute_resolution(signer2, dispute_id, in_favor_of_claimant=true)
+    Note over Treasury: resolution_weight >= threshold<br/>dispute status = ResolvedClaimant<br/>settlement status = Pending
+    Treasury--)Signer2: event: dispute_resolution_voted
+
+    alt Admin resolves directly instead of signer votes
+        Admin->>Treasury: resolve_dispute(admin, dispute_id, in_favor_of_claimant)
+        Note over Treasury: dispute status = ResolvedClaimant or ResolvedCounterparty<br/>settlement status = Pending
+        Treasury--)Admin: event: dispute_resolved
+    end
+
+    alt Admin resolves with a split
+        Admin->>Treasury: resolve_dispute_split(admin, dispute_id, claimant_bps, token)
+        Treasury->>Treasury: token.transfer(treasury → claimant, claimant_share)
+        Treasury->>Treasury: token.transfer(treasury → counterparty, counterparty_share)
+        Note over Treasury: dispute status = ResolvedSplit<br/>settlement status = Pending
+        Treasury--)Admin: event: dispute_resolved_split
+    end
+```
+
+### 5. Dispute Expiry Flow
+
+If a dispute passes its `expires_at` deadline without resolution, an admin can expire it, releasing the settlement back to `Pending`.
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Treasury
+
+    Note over Treasury: dispute status = Raised<br/>ledger.timestamp() > dispute.expires_at
+
+    Admin->>Treasury: expire_dispute(admin, dispute_id)
+    Note over Treasury: dispute status = Expired<br/>settlement status = Pending
+    Treasury--)Admin: event: dispute_expired
+```
+
+---
+
 ## Entrypoints
 
 | Function | Auth Required | Parameters | Returns | Errors |
