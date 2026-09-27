@@ -11,6 +11,7 @@
     "cancel_settlement",
     "cancel_signer_change",
     "deposit",
+    "emergency_withdraw",
     "execute_settlement",
     "execute_signer_change",
     "expire_dispute",
@@ -53,6 +54,7 @@
     "withdraw_all"
   ],
   "events": [
-    "deposit"
+    "deposit",
+    "emergency_withdraw"
   ]
 }
