@@ -174,7 +174,7 @@ pub enum DataKey {
     CreationCooldown,
     /// Timestamp of the last successful create_invoice call for a given merchant.
     LastCreatedAt(Address),
-    /// Default late fee (basis points) applied to invoices created without an
-    /// explicit per-invoice value. Bounded by `MAX_LATE_FEE_BPS`.
-    DefaultLateFeeBps,
+    /// Fee breakdown of a processed refund: gross amount, processing fee,
+    /// network fee and the net amount transferred to the payer (#71).
+    RefundBreakdown(u64),
 }
