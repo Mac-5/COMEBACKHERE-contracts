@@ -58,6 +58,24 @@ impl InvoiceContract {
             }
         }
 
+        // #537: enforce per-merchant open invoice limit
+        let max_open: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxOpenInvoices)
+            .unwrap_or(0u64);
+        if max_open != 0 {
+            let open_key = DataKey::MerchantOpenInvoiceCount(merchant.clone());
+            let open_count: u64 = env
+                .storage()
+                .persistent()
+                .get(&open_key)
+                .unwrap_or(0);
+            if open_count >= max_open {
+                return Err(InvoiceError::MerchantOpenInvoiceLimitReached);
+            }
+        }
+
         let count: u64 = env
             .storage()
             .instance()
@@ -110,6 +128,17 @@ impl InvoiceContract {
         env.storage()
             .persistent()
             .set(&merchant_count_key, &(merchant_count + 1));
+
+        // #537: track open (pending) invoice count for this merchant
+        let open_key = DataKey::MerchantOpenInvoiceCount(merchant.clone());
+        let open_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&open_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&open_key, &(open_count + 1));
 
         pending_index_add(&env, id);
         events::invoice_created(&env, id, &invoice);
@@ -234,6 +263,8 @@ impl InvoiceContract {
             .persistent()
             .set(&DataKey::Invoice(id), &invoice);
         pending_index_remove(&env, id);
+        // #537: decrement merchant open count on exit from pending
+        Self::decrement_open_count(&env, &invoice.merchant);
         append_history(&env, id, InvoiceStatus::Pending, InvoiceStatus::Paid);
         events::invoice_paid(&env, id, &invoice);
         Ok(())
