@@ -15,12 +15,15 @@ pub const MAX_BATCH_EXPIRE: u32 = 100;
 /// Maximum bytes accepted for optional invoice hash fields.
 pub const MAX_HASH_BYTES: u32 = 64;
 
-/// Maximum bytes accepted for the optional invoice memo field.
+/// Basis points denominator: 100% expressed in basis points.
+pub const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Upper bound for the configurable late fee, in basis points (10% = 1_000 bps).
 ///
-/// The memo is stored in persistent storage, so every byte costs rent; this
-/// cap keeps storage costs predictable and is documented in
-/// `docs/economic-parameters.md`.
-pub const MAX_MEMO_BYTES: u32 = 128;
+/// The late fee is applied only when an invoice is paid inside the grace window
+/// after `expires_at`. Values above this bound are rejected at configuration
+/// time so merchants cannot impose an unbounded penalty on late payers.
+pub const MAX_LATE_FEE_BPS: u32 = 1_000;
 
 /// Lifecycle status of an invoice.
 ///
@@ -90,6 +93,8 @@ pub struct Invoice {
     pub amount_usdc: i128,
     pub gross_usdc: i128,
     pub status: InvoiceStatus,
+    /// Ledger timestamp at creation, sourced from `env.ledger().timestamp()`.
+    pub created_at: u64,
     pub expires_at: u64,
     pub paid_at: Option<u64>,
     pub payer: MaybeAddress,
@@ -105,16 +110,34 @@ pub struct Invoice {
     /// Optional token contract address for multi-currency invoices.
     /// `None` means the invoice is denominated in the default (USDC).
     pub token_address: MaybeAddress,
-    /// Optional short memo describing what the invoice is for (e.g. an order
-    /// number or one-line description). Length-capped to `MAX_MEMO_BYTES`.
-    pub memo: MaybeString,
-    /// Cumulative amount paid so far, in the invoice's denomination.
-    ///
-    /// Starts at 0 and is incremented by `record_partial_payment`. The invoice
-    /// only transitions to `Paid` once this reaches `amount_usdc`. A full
-    /// `mark_paid` sets this to `amount_usdc` so existing integrators observe
-    /// the same final state.
-    pub amount_paid: i128,
+    /// Late fee in basis points applied when the invoice is paid inside the
+    /// grace window after `expires_at`. Bounded by `MAX_LATE_FEE_BPS`.
+    pub late_fee_bps: u32,
+}
+
+/// Lightweight, read-only projection of an [`Invoice`] for list views.
+///
+/// Contains only the fields frontends need when enumerating many invoices:
+/// id, status, amount and expiry. It is derived from the same storage record
+/// as `get_invoice` (never a duplicated copy), so it can never go out of sync.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceSummary {
+    pub id: u64,
+    pub status: InvoiceStatus,
+    pub amount_usdc: i128,
+    pub expires_at: u64,
+}
+
+impl From<&Invoice> for InvoiceSummary {
+    fn from(invoice: &Invoice) -> Self {
+        InvoiceSummary {
+            id: invoice.id,
+            status: invoice.status.clone(),
+            amount_usdc: invoice.amount_usdc,
+            expires_at: invoice.expires_at,
+        }
+    }
 }
 
 /// Parameters for a single invoice within a batch_create_invoice call.
@@ -128,8 +151,8 @@ pub struct BatchInvoiceParams {
     pub payment_link_hash: MaybeBytes,
     pub merchant_nonce: u64,
     pub token_address: MaybeAddress,
-    /// Optional short memo describing what the invoice is for.
-    pub memo: MaybeString,
+    /// Late fee in basis points applied inside the grace window.
+    pub late_fee_bps: u32,
 }
 
 /// A single status transition recorded in an invoice's audit log.
@@ -171,6 +194,7 @@ pub enum DataKey {
     CreationCooldown,
     /// Timestamp of the last successful create_invoice call for a given merchant.
     LastCreatedAt(Address),
-    /// Configured default token (USDC) address used when callers omit a token.
-    DefaultToken,
+    /// Fee breakdown of a processed refund: gross amount, processing fee,
+    /// network fee and the net amount transferred to the payer (#71).
+    RefundBreakdown(u64),
 }
