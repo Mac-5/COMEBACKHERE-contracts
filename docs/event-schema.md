@@ -146,6 +146,23 @@ as authoritative for the same reason — it is written last, after the fan-out.
 `settlement_workflow_executed` exists specifically so indexers can distinguish
 compliance-gated execution from a direct `Treasury::execute_settlement` call, which
 emits its own `settlement_executed` event (below) with no knowledge of the gate.
+The `amount` element is the settlement amount that moved, so the outcome, the
+recipient, and the amount are readable from this one event without correlating
+against `settlement_executed`.
+
+`workflow_batch_completed` carries the batch outcome: `requested` is the number of
+settlement IDs submitted and `executed` is how many were actually executed. A batch
+where `requested != executed` means some IDs were skipped (non-existent,
+already-executed, or threshold-failed), which is otherwise only discoverable by
+diffing the per-item events. It is published even when nothing executed, so a
+fully-skipped batch is still observable.
+
+**Failures emit no event.** A compliance-blocked merchant fails the whole
+invocation, and Soroban discards events from a failed invocation, so there is
+deliberately no "compliance blocked" event to subscribe to — an alert on
+`settlement_workflow_executed` not arriving is not a signal by itself. Alert on the
+failed transaction itself, which carries `ComplianceCheckFailed` (or `ContractPaused`
+while the workflow is halted).
 
 `admin_transfer_initiated` and `admin_transferred` mirror the compliance
 contract's pair above and carry the same two-step meaning: an indexer must read

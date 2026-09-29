@@ -89,7 +89,7 @@ spam from a compromised or malicious proposer. See
 ## 2. Deployment order
 
 Deployment order is not arbitrary. `contracts/settlement-workflow/src/lib.rs`'s
-`initialize(compliance_id, treasury_id)` **requires both the compliance and
+`initialize(admin, compliance_id, treasury_id)` **requires both the compliance and
 treasury contract addresses to already exist** — settlement-workflow pins
 them into its own instance storage as trusted call targets and refuses to
 accept them per-call afterward (see the `#364` note in that file). This
