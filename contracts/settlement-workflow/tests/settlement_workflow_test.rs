@@ -61,8 +61,8 @@ fn setup_with_signer(
 
     let workflow_id = env.register_contract(None, SettlementWorkflowContract);
     let workflow = SettlementWorkflowContractClient::new(&env, &workflow_id);
-    // Pin the trusted compliance/treasury instances once at init (#364) and record
-    // the admin allowed to pause/unpause the workflow (#616).
+    // Pin the trusted compliance/treasury instances and the admin once at init
+    // (#364, #621).
     workflow.initialize(&admin, &compliance_id, &treasury_id);
     // The workflow contract executes settlements as itself, so it must be an
     // authorized Treasury signer.
@@ -99,7 +99,7 @@ fn execution_blocked_when_compliance_returns_false() {
         token_id,
     ) = setup();
 
-    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000);
+    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000, &0_u64);
     token::StellarAssetClient::new(&env, &token_id).mint(&treasury_id, &10_000_000);
 
     let err = workflow
@@ -125,7 +125,7 @@ fn successful_path_executes_treasury_settlement() {
     ) = setup();
 
     compliance.allow_address(&admin, &merchant);
-    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000);
+    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000, &0_u64);
     token::StellarAssetClient::new(&env, &token_id).mint(&treasury_id, &10_000_000);
 
     workflow
@@ -154,7 +154,7 @@ fn emits_settlement_workflow_executed_event() {
     ) = setup();
 
     compliance.allow_address(&admin, &merchant);
-    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000);
+    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000, &0_u64);
     token::StellarAssetClient::new(&env, &token_id).mint(&treasury_id, &10_000_000);
 
     workflow.execute_with_compliance(&settlement_id, &token_id, &merchant);
@@ -203,8 +203,8 @@ fn batch_executes_multiple_settlements_and_skips_invalid_ids() {
 
     compliance.allow_address(&admin, &merchant);
 
-    let good_1 = treasury.propose_settlement(&admin, &merchant, &5_000_000);
-    let good_2 = treasury.propose_settlement(&admin, &merchant, &5_000_000);
+    let good_1 = treasury.propose_settlement(&admin, &merchant, &5_000_000, &0_u64);
+    let good_2 = treasury.propose_settlement(&admin, &merchant, &5_000_000, &0_u64);
     // A settlement that does not exist.
     let bogus: u64 = 999;
     token::StellarAssetClient::new(&env, &token_id).mint(&treasury_id, &10_000_000);
@@ -239,7 +239,7 @@ fn batch_rejected_when_compliance_fails() {
         token_id,
     ) = setup();
 
-    let good = treasury.propose_settlement(&admin, &merchant, &5_000_000);
+    let good = treasury.propose_settlement(&admin, &merchant, &5_000_000, &0_u64);
     let mut ids = soroban_sdk::Vec::new(&env);
     ids.push_back(good);
 
@@ -269,7 +269,7 @@ fn execute_with_compliance_stays_under_instruction_budget() {
     // Lift budget limits so the call chain is measured, not artificially capped.
     env.cost_estimate().budget().reset_unlimited();
     compliance.allow_address(&admin, &merchant);
-    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000);
+    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000, &0_u64);
     token::StellarAssetClient::new(&env, &token_id).mint(&treasury_id, &10_000_000);
     env.cost_estimate().budget().reset_tracker();
 
@@ -298,7 +298,7 @@ fn execute_with_compliance_is_idempotent_against_retried_call() {
     ) = setup();
 
     compliance.allow_address(&admin, &merchant);
-    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000);
+    let settlement_id = treasury.propose_settlement(&admin, &merchant, &10_000_000, &0_u64);
     token::StellarAssetClient::new(&env, &token_id).mint(&treasury_id, &10_000_000);
 
     // First execute call succeeds.

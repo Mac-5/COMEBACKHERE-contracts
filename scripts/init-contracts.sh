@@ -138,6 +138,9 @@ SETTLEMENT_WORKFLOW_ID=$(stellar contract deploy \
     --network "$NETWORK")
 echo "Settlement Workflow ID: $SETTLEMENT_WORKFLOW_ID"
 
+# The workflow's admin is set here and is thereafter only changeable through the
+# two-step transfer_admin/accept_admin flow (#621); there is no single-step
+# override, so choose this address deliberately.
 echo "Initializing Settlement Workflow contract..."
 stellar contract invoke \
     --id "$SETTLEMENT_WORKFLOW_ID" \
