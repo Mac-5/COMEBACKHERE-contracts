@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contracterror, contracttype, Address, Env, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env, Vec};
 
 /// Error codes for all treasury contract operations. Variants are append-only
 /// and must never be renumbered, as discriminants are stored on-chain and
@@ -161,6 +161,11 @@ pub struct Dispute {
     /// Claimant's share of `amount` in basis points (0..=10_000), set when `status` is
     /// `ResolvedSplit`; meaningless (always 0) for every other status. See #456.
     pub claimant_share_bps: u32,
+    /// Optional 32-byte hash of an off-chain evidence bundle (screenshots, messages,
+    /// delivery proof) supporting the dispute (#574). `None` when the claimant supplied
+    /// none. Purely a verifiable pointer for signers/audits — never itself verified
+    /// on-chain.
+    pub evidence_hash: Option<BytesN<32>>,
 }
 
 /// Lifecycle state of a signer-rotation proposal.

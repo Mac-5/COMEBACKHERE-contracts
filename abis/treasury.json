@@ -21,6 +21,7 @@
     "get_all_signers",
     "get_allowed_tokens",
     "get_balance",
+    "get_compliance_id",
     "get_dispute",
     "get_hold_reason",
     "get_hold_expiry",

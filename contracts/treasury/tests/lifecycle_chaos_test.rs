@@ -283,7 +283,7 @@ fn run_lifecycle(fp: FailurePoint) -> Outcome {
         FailurePoint::ExecuteSettlementOnHold => {
             let claimant = Address::generate(&ctx.env);
             ctx.treasury
-                .raise_dispute(&claimant, &settlement_id, &ctx.merchant, &1, &u64::MAX);
+                .raise_dispute(&claimant, &settlement_id, &ctx.merchant, &1, &u64::MAX, &None);
             assert_eq!(
                 ctx.treasury.get_settlement(&settlement_id).status,
                 SettlementStatus::OnHold

@@ -44,8 +44,15 @@ impl TreasuryContract {
     /// `execute_settlement` will reject calls after that timestamp even when approvals
     /// are complete. Pass `0` for no deadline.
     /// Preconditions: contract not paused; `signer` must be an authorised signer with non-zero weight.
+    /// If a compliance contract has been pinned via `set_compliance_id` (#571), `merchant_address`
+    /// must currently pass `Compliance::is_allowed` or the proposal is rejected outright — this
+    /// surfaces a blocked recipient immediately instead of after signers have already spent time
+    /// approving a proposal that could never execute. The execution-time check (enforced
+    /// separately, by a compliance-gated workflow contract) still applies on top of this: an
+    /// address can be blocked *between* proposal and execution, which this does not catch.
+    /// Without a pinned compliance contract, this check is skipped entirely (pre-#571 behavior).
     /// Panics: `ContractPaused`, `UnauthorizedSigner`.
-    /// Errors: `InvalidAmount`, `ArithmeticOverflow`.
+    /// Errors: `InvalidAmount`, `ArithmeticOverflow`, `ComplianceCheckFailed`.
     /// Emits: `settlement_proposed`.
     pub fn propose_settlement(
         env: Env,
@@ -78,6 +85,14 @@ impl TreasuryContract {
         if amount <= 0 {
             return Err(TreasuryError::InvalidAmount);
         }
+        if let Some(compliance_id) = env
+            .storage()
+            .instance()
+            .get::<DataKey, Address>(&DataKey::ComplianceId)
+        {
+            ComplianceClient::new(&env, &compliance_id)
+                .require_allowed_for_treasury(&merchant_address)?;
+        }
         let count: u64 = env
             .storage()
             .instance()
@@ -100,9 +115,7 @@ impl TreasuryContract {
             proposed_at: env.ledger().timestamp(),
             execution_deadline,
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(id), &settlement);
+        write_settlement(&env, id, &settlement);
         env.storage().instance().set(&DataKey::SettlementCount, &id);
         env.events()
             .publish((Symbol::new(&env, "settlement_proposed"), id), settlement);
@@ -145,9 +158,7 @@ impl TreasuryContract {
             &mut settlement.approval_weight,
             &signer,
         );
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (Symbol::new(&env, "settlement_approved"), settlement_id),
             settlement.clone(),
@@ -228,9 +239,7 @@ impl TreasuryContract {
                             .ok_or(TreasuryError::WeightOverflow)?;
                         settlement.approvals.push_back(signer.clone());
                     }
-                    env.storage()
-                        .persistent()
-                        .set(&DataKey::Settlement(id), &settlement);
+                    write_settlement(&env, id, &settlement);
                     env.events().publish(
                         (Symbol::new(&env, "settlement_approved"), id),
                         settlement.clone(),
@@ -285,9 +294,7 @@ impl TreasuryContract {
             &mut settlement.approval_weight,
             &signer,
         );
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (
                 Symbol::new(&env, "settlement_partial_approved"),
@@ -411,9 +418,7 @@ impl TreasuryContract {
         let token_client = token::Client::new(&env, &token_contract);
         token_client.transfer(&treasury, &payout_address, &settlement.amount);
         settlement.status = SettlementStatus::Executed;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (Symbol::new(&env, "settlement_executed"), settlement_id),
             settlement,
@@ -464,9 +469,7 @@ impl TreasuryContract {
         let token_client = token::Client::new(&env, &token_contract);
         token_client.transfer(&treasury, &settlement.merchant_address, &partial_amount);
         settlement.status = SettlementStatus::PartiallyExecuted;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (
                 Symbol::new(&env, "settlement_partial_executed"),
@@ -497,9 +500,7 @@ impl TreasuryContract {
             return Err(TreasuryError::SettlementNotCancellable);
         }
         settlement.status = SettlementStatus::Cancelled;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (Symbol::new(&env, "settlement_cancelled"), settlement_id),
             settlement,
@@ -515,9 +516,7 @@ impl TreasuryContract {
             if let Some(mut settlement) = settlement_opt {
                 if settlement.status == SettlementStatus::Pending {
                     settlement.status = SettlementStatus::Cancelled;
-                    env.storage()
-                        .persistent()
-                        .set(&DataKey::Settlement(id), &settlement);
+                    write_settlement(&env, id, &settlement);
                     env.events()
                         .publish((Symbol::new(&env, "settlement_cancelled"), id), settlement);
                 }
@@ -561,9 +560,7 @@ impl TreasuryContract {
             soroban_sdk::panic_with_error!(env, TreasuryError::ForceCancelNotAllowed);
         }
         settlement.status = SettlementStatus::Cancelled;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (
                 Symbol::new(&env, "settlement_force_cancelled"),
@@ -573,56 +570,54 @@ impl TreasuryContract {
         );
     }
 
+    /// Returns every currently-`Pending` settlement (#572: reads
+    /// `DataKey::PendingSettlementIndex` — kept in sync by `write_settlement` on every
+    /// settlement write — so cost is proportional to the pending set, not to total
+    /// settlement history).
     pub fn get_pending_settlements(env: Env) -> Vec<Settlement> {
-        let count: u64 = env
+        let index: Vec<u64> = env
             .storage()
             .instance()
-            .get(&DataKey::SettlementCount)
-            .unwrap_or(0);
+            .get(&DataKey::PendingSettlementIndex)
+            .unwrap_or_else(|| Vec::new(&env));
         let mut pending = Vec::new(&env);
-        let mut id = 1u64;
-        while id <= count {
+        for id in index.iter() {
             if let Some(settlement) = env
                 .storage()
                 .persistent()
                 .get::<DataKey, Settlement>(&DataKey::Settlement(id))
             {
-                if settlement.status == SettlementStatus::Pending {
-                    pending.push_back(settlement);
-                }
+                pending.push_back(settlement);
             }
-            id += 1;
         }
         pending
     }
 
     /// Returns a page of pending settlements: skips the first `start` entries and returns up to `limit`.
+    /// (#572: iterates the pending index rather than the full settlement history.)
     pub fn get_pending_settlements_page(env: Env, start: u64, limit: u64) -> Vec<Settlement> {
-        let count: u64 = env
+        let index: Vec<u64> = env
             .storage()
             .instance()
-            .get(&DataKey::SettlementCount)
-            .unwrap_or(0);
+            .get(&DataKey::PendingSettlementIndex)
+            .unwrap_or_else(|| Vec::new(&env));
         let mut page = Vec::new(&env);
         let mut skipped: u64 = 0;
-        let mut id = 1u64;
-        while id <= count {
+        for id in index.iter() {
+            if skipped < start {
+                skipped += 1;
+                continue;
+            }
+            if (page.len() as u64) >= limit {
+                break;
+            }
             if let Some(settlement) = env
                 .storage()
                 .persistent()
                 .get::<DataKey, Settlement>(&DataKey::Settlement(id))
             {
-                if settlement.status == SettlementStatus::Pending {
-                    if skipped < start {
-                        skipped += 1;
-                    } else if (page.len() as u64) < limit {
-                        page.push_back(settlement);
-                    } else {
-                        break;
-                    }
-                }
+                page.push_back(settlement);
             }
-            id += 1;
         }
         page
     }
@@ -668,7 +663,6 @@ impl TreasuryContract {
                     }
                 }
             }
-            id += 1;
         }
         buckets
     }
@@ -714,9 +708,7 @@ impl TreasuryContract {
             return Err(TreasuryError::TtlNotElapsed);
         }
         settlement.status = SettlementStatus::Expired;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Settlement(settlement_id), &settlement);
+        write_settlement(&env, settlement_id, &settlement);
         env.events().publish(
             (Symbol::new(&env, "settlement_expired"), settlement_id),
             settlement,

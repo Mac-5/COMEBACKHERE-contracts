@@ -310,6 +310,7 @@ fn dispute_struct_shape_is_unchanged() {
         resolution_for_claimant,
         dispute_expires_at,
         claimant_share_bps,
+        evidence_hash,
     } = dispute;
 
     assert_eq!(id, did);
@@ -323,6 +324,7 @@ fn dispute_struct_shape_is_unchanged() {
     assert!(!resolution_for_claimant);
     assert_eq!(dispute_expires_at, 1_000);
     assert_eq!(claimant_share_bps, 0);
+    assert!(evidence_hash.is_none());
 }
 
 /// Builds a real `SignerRotationProposal` through the deployed contract and

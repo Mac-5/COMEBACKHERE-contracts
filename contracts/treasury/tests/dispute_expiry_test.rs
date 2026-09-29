@@ -105,7 +105,7 @@ fn expire_dispute_without_linked_settlement_still_succeeds() {
     let claimant = Address::generate(&env);
 
     // Raise a dispute against a non-existent settlement (no OnHold settlement to release).
-    let did = client.raise_dispute(&claimant, &9999, &merchant, &5_000_000, &500);
+    let did = client.raise_dispute(&claimant, &9999, &merchant, &5_000_000, &500, &None);
 
     env.ledger().with_mut(|l| l.timestamp = 600);
     client.expire_dispute(&admin, &did);

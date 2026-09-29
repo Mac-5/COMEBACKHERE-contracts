@@ -1,10 +1,10 @@
 use crate::{
-    require_admin, require_not_paused, DataKey, Dispute, DisputeStatus, Settlement,
-    SettlementHoldReason, SettlementStatus, TreasuryContract, TreasuryContractArgs,
+    require_admin, require_not_paused, write_settlement, DataKey, Dispute, DisputeStatus,
+    Settlement, SettlementHoldReason, SettlementStatus, TreasuryContract, TreasuryContractArgs,
     TreasuryContractClient, TreasuryError,
 };
 use multisig::{meets_threshold, record_approval, require_authorized_signer};
-use soroban_sdk::{contractimpl, token, Address, Env, Symbol, Vec};
+use soroban_sdk::{contractimpl, token, Address, BytesN, Env, Symbol, Vec};
 
 /// Basis-points denominator for `resolve_dispute_split`'s ratio (10_000 = 100.00%).
 pub const BPS_DENOMINATOR: u32 = 10_000;
@@ -13,6 +13,11 @@ pub const BPS_DENOMINATOR: u32 = 10_000;
 impl TreasuryContract {
     /// Raises a dispute against `settlement_id`, placing it on hold while the dispute is open.
     /// `expires_at` is a ledger UNIX timestamp (seconds) after which `expire_dispute` may be called.
+    /// `evidence_hash` is an optional 32-byte hash of an off-chain evidence bundle
+    /// (screenshots, messages, delivery proof) (#574): a verifiable pointer every signer
+    /// can check against the same material, and a tamper-evident record for later audits.
+    /// It is purely informational — never itself verified on-chain — and is returned
+    /// unchanged by `get_dispute`. Pass `None` when there is no evidence to attach.
     /// Preconditions: contract not paused; `amount` must be positive.
     /// Errors: `ContractPaused`, `InvalidAmount`, `ArithmeticOverflow`.
     /// Emits: `dispute_raised`.
@@ -23,6 +28,7 @@ impl TreasuryContract {
         counterparty: Address,
         amount: i128,
         expires_at: u64,
+        evidence_hash: Option<BytesN<32>>,
     ) -> Result<u64, TreasuryError> {
         require_not_paused(&env);
         claimant.require_auth();
@@ -36,9 +42,7 @@ impl TreasuryContract {
         {
             if settlement.status == SettlementStatus::Pending {
                 settlement.status = SettlementStatus::OnHold;
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Settlement(settlement_id), &settlement);
+                write_settlement(&env, settlement_id, &settlement);
             }
         }
         let count: u64 = env
@@ -61,6 +65,7 @@ impl TreasuryContract {
             resolution_for_claimant: false,
             dispute_expires_at: expires_at,
             claimant_share_bps: 0,
+            evidence_hash,
         };
         env.storage()
             .persistent()
@@ -212,7 +217,7 @@ impl TreasuryContract {
 
     /// Casts a weighted signer vote on a dispute; auto-resolves when cumulative weight meets threshold.
     /// Errors: `ContractPaused`, `UnauthorizedSigner`, `DisputeNotFound`, `DisputeAlreadyResolved`,
-    ///         `ResolutionDirectionMismatch`, `ThresholdNotConfigured`.
+    ///         `ResolutionDirectionMismatch`, `ThresholdNotConfigured`, `DuplicateVote`.
     /// Emits: `dispute_resolution_voted`.
     pub fn vote_dispute_resolution(
         env: Env,
@@ -229,6 +234,12 @@ impl TreasuryContract {
             .ok_or(TreasuryError::DisputeNotFound)?;
         if dispute.status != DisputeStatus::Raised {
             return Err(TreasuryError::DisputeAlreadyResolved);
+        }
+        // #573: a signer voting twice on the same dispute must not be able to push a
+        // resolution through alone. `resolution_approvals` is the same approval-tracking
+        // list `record_approval` (multisig crate) already maintains for this purpose.
+        if dispute.resolution_approvals.contains(&signer) {
+            return Err(TreasuryError::DuplicateVote);
         }
         if dispute.resolution_weight == 0 {
             dispute.resolution_for_claimant = in_favor_of_claimant;
@@ -296,9 +307,7 @@ fn release_settlement_hold_if_no_open_disputes(env: &Env, settlement_id: u64) {
             if !has_open {
                 settlement.status = SettlementStatus::Pending;
                 settlement.hold_reason = SettlementHoldReason::None;
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::Settlement(settlement_id), &settlement);
+                write_settlement(env, settlement_id, &settlement);
             }
         }
     }
