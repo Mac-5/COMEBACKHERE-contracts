@@ -126,11 +126,7 @@ sequenceDiagram
 
 Each contract defines error codes via a `#[contracterror]` enum. New variants **must** be appended at the end (highest numeric value) to preserve on-chain backwards compatibility — existing contracts and clients may depend on the current ordinal positions.
 
-Every one of those enums is declared through the shared `declare_contract_error!` macro in `crates/error-macros`, which supplies the `#[contracterror]`, `#[derive(...)]` and `#[repr(u32)]` block so the convention cannot drift between crates. The variant lists — including the explicit discriminants below — are still written out by hand and are enforced append-only by `scripts/check-enum-ordering.sh`.
-
-> **Stale-range warning:** the ranges in the headings below lag the enums in a few places (`InvoiceError` is `1..=23` and `ContractError` is `1..=6`, not `1..=21` and `1..=4`; `TreasuryError` is `1..=40`, not `1..=17`). The enums are the ABI source of truth; the per-crate READMEs under `crates/` carry current, per-code tables.
-
-### Invoice Contract (`InvoiceError` — range 1..=21)
+### Invoice Contract (`InvoiceError` — range 1..=28)
 
 | Code | Name | Description |
 |---|---|---|
@@ -155,6 +151,13 @@ Every one of those enums is declared through the shared `declare_contract_error!
 | 19 | `TokenMismatch` | Provided payment token does not match invoice's expected token |
 | 20 | `BatchTooLarge` | Batch input exceeds `MAX_BATCH_SIZE` |
 | 21 | `CooldownActive` | `create_invoice` called again before `CreationCooldown` elapsed |
+| 22 | `InvoiceCountOverflow` | `u64` invoice id counter would overflow |
+| 23 | `HashTooLong` | Optional hash field exceeds `MAX_HASH_BYTES` (64) |
+| 24 | `PaymentStateInconsistent` | Invoice does not describe a completed payment (no `paid_at`, no recorded payer, or `amount_usdc`/`gross_usdc` inconsistent) — refunds are refused (#70) |
+| 25 | `RefundTransferFailed` | The cross-contract token transfer executing a refund failed; the refund is abandoned with no state change (#70) |
+| 26 | `RefundTokenNotSet` | Refund payout attempted on an invoice created without a `token_address` (#70) |
+| 27 | `RefundFeeTooHigh` | `fee_bps` above `MAX_REFUND_FEE_BPS` (10_000 bps = 100%); rejected before the payout transfer is attempted (#71) |
+| 28 | `ArithmeticOverflow` | Refund fee arithmetic exceeded `i128`; unreachable for any in-range input, kept as a typed backstop so a bound change fails as an error rather than a trap (#71) |
 
 ### Treasury Contract (`TreasuryError` — range 1..=17)
 
@@ -188,6 +191,25 @@ Every one of those enums is declared through the shared `declare_contract_error!
 | 4 | `BatchTooLarge` (ContractError) | Batch input exceeds `MAX_BATCH_SIZE` |
 
 > **Note:** `ComplianceError` enum exists separately with code `AlreadyInitialized = 1` for historical compatibility. New error variants should be added to `ContractError`.
+
+### Settlement Workflow Contract (`WorkflowError` — range 1..=10)
+
+Coordination errors raised by the workflow contract itself, distinct from the
+`TreasuryError` values its settlement path returns (borrowed from `multisig`
+because that crate was already a dependency).
+
+| Code | Name | Description |
+|---|---|---|
+| 1 | `Unauthorized` | Caller is not the configured emergency-pause admin |
+| 2 | `NotConfigured` | `initialize_emergency_pause` has not been called, so there is no target set |
+| 3 | `PauseTargetFailed` | A target refused to pause; the whole sweep is rolled back, so nothing is left paused (#73) |
+| 4 | `UnpauseTargetFailed` | A target refused to unpause; the whole sweep is rolled back, so nothing is left resumed (#73) |
+| 5 | `NoPauseTargets` | An empty target set was supplied |
+| 6 | `TooManyPauseTargets` | More than `MAX_PAUSE_TARGETS` (8) targets |
+| 7 | `DuplicatePauseTarget` | The same address appears twice in the target set |
+| 8 | `SelfPauseTarget` | The workflow contract itself was supplied as a target |
+| 9 | `EmergencyPauseActive` | The target set cannot be repointed while an emergency pause is open |
+| 10 | `NotEmergencyPaused` | `resume_all` was called with no emergency pause active |
 
 ---
 
@@ -226,12 +248,28 @@ SettlementWorkflow
   ├── Compliance::is_allowed(merchant)      → compliance gate; if false, returns Err(ComplianceCheckFailed)
   └── Treasury::execute_settlement(...)     → called ONLY if the gate passes; transfers tokens to merchant
 
+SettlementWorkflow (emergency pause coordination, #73)
+  └── {Invoice,Treasury,Compliance}::pause(admin)
+       → fanned out over the configured target set in order, passing this
+         contract's own address as `admin`. All-or-nothing: the first target that
+         does not return Ok aborts the whole call with PauseTargetFailed, and
+         returning Err reverts the targets already paused. The orchestrator's
+         only authority over the rest of the protocol is "stop it" — the client
+         trait declares pause/unpause and nothing else.
+
 Treasury::execute_settlement
   └── Token::transfer(treasury → merchant)  → SEP-41 token transfer
 
-Invoice (standalone — no outbound cross-contract calls)
+Invoice::process_refund                      → verify payment state, then
+  └── Token::transfer(escrow → payer)         Token::transfer(escrow → payer)  → SEP-41 token transfer; a failure reverts the whole
+                                               refund with RefundTransferFailed (#70)
+
+Invoice (cross-contract calls: Token only, on the refund payout path)
 Treasury (standalone — no outbound cross-contract calls except Token)
 Compliance (standalone — no outbound cross-contract calls)
+SettlementWorkflow (cross-contract calls: Compliance::is_allowed and
+  Treasury::execute_settlement on the settlement path, plus pause/unpause on the
+  emergency-pause path)
 ```
 
 ### Cross-Contract Compliance Call Failure Modes

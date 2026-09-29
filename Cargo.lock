@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "comebackhere-multisig"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "comebackhere-error-macros",
  "soroban-sdk",
@@ -332,6 +332,7 @@ dependencies = [
  "comebackhere-compliance-errors",
  "comebackhere-invoice-errors",
  "comebackhere-treasury",
+ "soroban-sdk",
 ]
 
 [[package]]
