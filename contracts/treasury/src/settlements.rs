@@ -1,21 +1,48 @@
 use crate::{
-    require_admin, require_not_paused, write_settlement, DataKey, Settlement,
-    SettlementHoldReason, SettlementStatus, TreasuryContract, TreasuryContractArgs,
-    TreasuryContractClient, TreasuryError, MAX_ALLOWED_TOKENS,
+    require_admin, require_not_paused, DataKey, MaybeAddress, Settlement, SettlementHoldReason,
+    SettlementStatus, TreasuryContract, TreasuryContractArgs, TreasuryContractClient, TreasuryError,
+    MAX_ALLOWED_TOKENS,
 };
-use compliance_client::ComplianceClient;
-use multisig::{meets_threshold, record_approval, require_authorized_signer, signer_weight};
+use multisig::{
+    meets_threshold, record_approval, require_authorized_signer,
+    revoke_approval as revoke_signer_approval, signer_weight,
+};
 use soroban_sdk::{contractimpl, token, Address, Env, Symbol, Vec};
 
-const SETTLEMENT_TTL: u64 = 7 * 24 * 60 * 60;
 
 /// Maximum number of settlement IDs accepted per batch call, consistent with
 /// the batch caps used elsewhere in the workspace (see #8/#21).
 const MAX_BATCH_SIZE: u32 = 50;
 
+/// Whether any settlement is still `Pending`. Stops at the first one found.
+fn has_pending_settlement(env: &Env) -> bool {
+    let count: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::SettlementCount)
+        .unwrap_or(0);
+    let mut id = 1u64;
+    while id <= count {
+        if let Some(settlement) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Settlement>(&DataKey::Settlement(id))
+        {
+            if settlement.status == SettlementStatus::Pending {
+                return true;
+            }
+        }
+        id += 1;
+    }
+    false
+}
+
 #[contractimpl]
 impl TreasuryContract {
     /// Proposes a new settlement of `amount` tokens payable to `merchant_address`.
+    /// An optional `execution_deadline` (Unix timestamp) may be set; if non-zero,
+    /// `execute_settlement` will reject calls after that timestamp even when approvals
+    /// are complete. Pass `0` for no deadline.
     /// Preconditions: contract not paused; `signer` must be an authorised signer with non-zero weight.
     /// If a compliance contract has been pinned via `set_compliance_id` (#571), `merchant_address`
     /// must currently pass `Compliance::is_allowed` or the proposal is rejected outright — this
@@ -32,6 +59,26 @@ impl TreasuryContract {
         signer: Address,
         merchant_address: Address,
         amount: i128,
+        execution_deadline: u64,
+    ) -> Result<u64, TreasuryError> {
+        Self::propose_settlement_with_token(env, signer, merchant_address, amount, MaybeAddress::None)
+    }
+
+    /// Proposes a new settlement capturing the intended `token` at proposal time.
+    /// Behaves identically to `propose_settlement` except that `token` is stored on the
+    /// settlement and surfaced by `get_pending_metrics` to group metrics per token.
+    /// Use `MaybeAddress::None` if the token is not yet known (equivalent to
+    /// calling `propose_settlement`).
+    /// Preconditions: contract not paused; `signer` must be an authorised signer with non-zero weight.
+    /// Panics: `ContractPaused`, `UnauthorizedSigner`.
+    /// Errors: `InvalidAmount`, `ArithmeticOverflow`.
+    /// Emits: `settlement_proposed`.
+    pub fn propose_settlement_with_token(
+        env: Env,
+        signer: Address,
+        merchant_address: Address,
+        amount: i128,
+        token: MaybeAddress,
     ) -> Result<u64, TreasuryError> {
         require_not_paused(&env);
         require_authorized_signer(&env, &signer);
@@ -66,6 +113,7 @@ impl TreasuryContract {
             status: SettlementStatus::Pending,
             hold_reason: SettlementHoldReason::None,
             proposed_at: env.ledger().timestamp(),
+            execution_deadline,
         };
         write_settlement(&env, id, &settlement);
         env.storage().instance().set(&DataKey::SettlementCount, &id);
@@ -80,8 +128,9 @@ impl TreasuryContract {
         signer: Address,
         merchant_address: Address,
         amount: i128,
+        execution_deadline: u64,
     ) -> Result<u64, TreasuryError> {
-        Self::propose_settlement(env, signer, merchant_address, amount)
+        Self::propose_settlement(env, signer, merchant_address, amount, execution_deadline)
     }
 
     /// Adds `signer`'s weight to the approval set of a pending settlement.
@@ -113,6 +162,49 @@ impl TreasuryContract {
         env.events().publish(
             (Symbol::new(&env, "settlement_approved"), settlement_id),
             settlement.clone(),
+        );
+        Ok(settlement)
+    }
+
+    /// Withdraws `signer`'s earlier approval of a pending settlement, subtracting their weight
+    /// from the settlement's approval weight. If that drops the total below the threshold,
+    /// `execute_settlement` is blocked again until enough approvals are re-collected.
+    /// Only possible while the settlement is still `Pending` (i.e. before execution).
+    /// Panics: `ContractPaused`, `UnauthorizedSigner`.
+    /// Errors: `SettlementNotFound`, `AlreadyExecuted`, `ApprovalNotFound`.
+    /// Emits: `settlement_approval_revoked`.
+    pub fn revoke_approval(
+        env: Env,
+        signer: Address,
+        settlement_id: u64,
+    ) -> Result<Settlement, TreasuryError> {
+        require_not_paused(&env);
+        require_authorized_signer(&env, &signer);
+        let mut settlement: Settlement = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Settlement(settlement_id))
+            .ok_or(TreasuryError::SettlementNotFound)?;
+        if settlement.status != SettlementStatus::Pending {
+            return Err(TreasuryError::AlreadyExecuted);
+        }
+        if !revoke_signer_approval(
+            &env,
+            &mut settlement.approvals,
+            &mut settlement.approval_weight,
+            &signer,
+        ) {
+            return Err(TreasuryError::ApprovalNotFound);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Settlement(settlement_id), &settlement);
+        env.events().publish(
+            (
+                Symbol::new(&env, "settlement_approval_revoked"),
+                settlement_id,
+            ),
+            (signer, settlement.clone()),
         );
         Ok(settlement)
     }
@@ -226,6 +318,32 @@ impl TreasuryContract {
     /// `Compliance::is_allowed` and is the recommended, compliance-checked entry point
     /// for executing a settlement (per ARCHITECTURE.md's description of
     /// SettlementWorkflow's role).
+    /// Executes multiple pending settlements in a single transaction.
+    /// Fails atomically: if any settlement cannot be executed, no settlements in the batch are executed.
+    /// Batch size is capped at 100 to stay within Soroban budget limits.
+    /// Panics: `ContractPaused`, `UnauthorizedSigner`.
+    /// Errors: `BatchTooLarge` or any error from execute_settlement.
+    /// Emits: one `settlement_executed` event per settlement executed.
+    pub fn batch_execute_settlements(
+        env: Env,
+        signer: Address,
+        settlement_data: Vec<(u64, Address)>,
+    ) -> Result<(), TreasuryError> {
+        const BATCH_MAX: usize = 100;
+        if settlement_data.len() > BATCH_MAX {
+            return Err(TreasuryError::BatchTooLarge);
+        }
+
+        require_not_paused(&env);
+        require_authorized_signer(&env, &signer);
+
+        for (settlement_id, token_contract) in settlement_data.iter() {
+            Self::execute_settlement(env.clone(), signer.clone(), settlement_id, token_contract)?;
+        }
+
+        Ok(())
+    }
+
     pub fn execute_settlement(
         env: Env,
         signer: Address,
@@ -240,9 +358,24 @@ impl TreasuryContract {
             .get(&DataKey::Settlement(settlement_id))
             .ok_or(TreasuryError::SettlementNotFound)?;
         if settlement.status == SettlementStatus::OnHold {
-            return Err(TreasuryError::SettlementOnHold);
+            // Treat an expired hold as released — check whether the hold still
+            // applies before rejecting execution.
+            let hold_expired = env
+                .storage()
+                .persistent()
+                .get::<_, u64>(&DataKey::HoldExpiry(settlement_id))
+                .map(|expires_at| env.ledger().timestamp() >= expires_at)
+                .unwrap_or(false);
+            if !hold_expired {
+                return Err(TreasuryError::SettlementOnHold);
+            }
+            // Hold has lapsed — treat as Pending for execution purposes.
+            // The status remains OnHold in storage until explicitly released
+            // (lazy evaluation, consistent with compliance's AllowedUntil pattern).
         }
-        if settlement.status != SettlementStatus::Pending {
+        if settlement.status != SettlementStatus::Pending
+            && settlement.status != SettlementStatus::OnHold
+        {
             return Err(TreasuryError::AlreadyExecuted);
         }
         let threshold: u32 = env
@@ -255,6 +388,13 @@ impl TreasuryContract {
         }
         if !meets_threshold(settlement.approval_weight, threshold) {
             return Err(TreasuryError::ThresholdNotMet);
+        }
+        // Enforce execution deadline: if the proposer set a non-zero deadline,
+        // reject execution after that timestamp even when approvals are complete.
+        if settlement.execution_deadline > 0
+            && env.ledger().timestamp() > settlement.execution_deadline
+        {
+            return Err(TreasuryError::ExecutionDeadlineExceeded);
         }
         if token_contract == env.current_contract_address() {
             return Err(TreasuryError::InvalidTokenContract);
@@ -482,30 +622,49 @@ impl TreasuryContract {
         page
     }
 
-    /// Returns aggregate metrics over all pending settlements: `(count, total_value)`.
-    /// Computed in a single call so operational monitoring doesn't need to paginate
-    /// through `get_pending_settlements_page` and sum client-side just to answer
-    /// "how much is currently pending settlement". (#572: iterates the pending index
-    /// rather than the full settlement history.)
-    pub fn get_pending_metrics(env: Env) -> (u64, i128) {
-        let index: Vec<u64> = env
+    /// Returns aggregate metrics over all pending settlements broken down per token.
+    /// Each entry in the returned `Vec` is `(token, count, total_value)` where `token`
+    /// is the `MaybeAddress` captured at proposal time. Settlements proposed without a
+    /// specific token are grouped under `MaybeAddress::None`. This replaces the previous
+    /// single-bucket `(count, total_value)` return, which was misleading when the treasury
+    /// holds multiple assets (see #585).
+    pub fn get_pending_metrics(env: Env) -> Vec<(MaybeAddress, u64, i128)> {
+        let count: u64 = env
             .storage()
             .instance()
-            .get(&DataKey::PendingSettlementIndex)
-            .unwrap_or_else(|| Vec::new(&env));
-        let mut pending_count: u64 = 0;
-        let mut total_value: i128 = 0;
-        for id in index.iter() {
+            .get(&DataKey::SettlementCount)
+            .unwrap_or(0);
+        // We build a flat accumulator list of (token, count, total) tuples.
+        // Soroban does not provide a Map type in storage helpers, so we do a linear
+        // scan over the accumulator on every new token — acceptable because the
+        // number of distinct tokens is bounded by MAX_ALLOWED_TOKENS (20).
+        let mut buckets: Vec<(MaybeAddress, u64, i128)> = Vec::new(&env);
+        let mut id = 1u64;
+        while id <= count {
             if let Some(settlement) = env
                 .storage()
                 .persistent()
                 .get::<DataKey, Settlement>(&DataKey::Settlement(id))
             {
-                pending_count += 1;
-                total_value += settlement.amount;
+                if settlement.status == SettlementStatus::Pending {
+                    let tok = settlement.token.clone();
+                    let mut found = false;
+                    // Scan existing buckets for a matching token.
+                    for i in 0..buckets.len() {
+                        let (b_tok, b_cnt, b_val) = buckets.get(i).unwrap();
+                        if b_tok == tok {
+                            buckets.set(i, (b_tok, b_cnt + 1, b_val + settlement.amount));
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        buckets.push_back((tok, 1u64, settlement.amount));
+                    }
+                }
             }
         }
-        (pending_count, total_value)
+        buckets
     }
 
     /// Returns the settlement with the given `settlement_id`.
@@ -540,7 +699,12 @@ impl TreasuryContract {
         if settlement.status != SettlementStatus::Pending {
             return Err(TreasuryError::AlreadyExecuted);
         }
-        if env.ledger().timestamp() <= settlement.proposed_at + SETTLEMENT_TTL {
+        let expiry_secs: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SettlementExpirySecs)
+            .unwrap_or(7u64 * 24 * 60 * 60);
+        if env.ledger().timestamp() <= settlement.proposed_at + expiry_secs {
             return Err(TreasuryError::TtlNotElapsed);
         }
         settlement.status = SettlementStatus::Expired;
@@ -601,6 +765,11 @@ impl TreasuryContract {
     }
 
     /// Removes `token` from the settlement token allowlist (admin-only).
+    /// A settlement does not record its token (it is supplied to `execute_settlement`), so
+    /// any `Pending` settlement is treated as potentially depending on every allowlisted
+    /// token: removal of an allowlisted token is refused until none remain pending.
+    /// Removing a token that is not on the allowlist is not blocked.
+    /// Panics: `Unauthorized`, `TokenHasPendingSettlements`.
     /// Emits: `token_removed`.
     pub fn remove_allowed_token(env: Env, admin: Address, token: Address) {
         require_admin(&env, &admin);
@@ -609,6 +778,9 @@ impl TreasuryContract {
             .instance()
             .get(&DataKey::TokenAllowlist)
             .unwrap_or_else(|| Vec::new(&env));
+        if allowlist.contains(&token) && has_pending_settlement(&env) {
+            soroban_sdk::panic_with_error!(env, TreasuryError::TokenHasPendingSettlements);
+        }
         let mut updated = Vec::new(&env);
         for t in allowlist.iter() {
             if t != token {
