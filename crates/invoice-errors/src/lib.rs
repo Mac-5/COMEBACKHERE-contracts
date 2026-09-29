@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::contracterror;
+use error_macros::declare_contract_error;
 
 /// Error codes for the invoice contract.
 ///

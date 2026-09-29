@@ -215,12 +215,13 @@ because that crate was already a dependency).
 
 ## Shared Crates — Types, Not Storage
 
-The two shared crates (`crates/multisig` and `crates/protocol-errors`) provide types and error definitions that are imported by the contracts. They are **not deployed contracts** and have **no DataKeys or on-chain storage of their own**.
+The shared crates (`crates/multisig`, `crates/protocol-errors`, and `crates/error-macros`) provide types and error definitions that are imported by the contracts. They are **not deployed contracts** and have **no DataKeys or on-chain storage of their own**.
 
 | Crate | What it provides | Storage |
 |---|---|---|
-| `crates/multisig` | `SettlementHoldReason` enum, multisig helper types | None |
+| `crates/multisig` | `SettlementHoldReason` enum, multisig helper types, `TreasuryError` | None |
 | `crates/protocol-errors` | Shared error type utilities | None |
+| `crates/error-macros` | `declare_contract_error!` macro used by every `#[contracterror]` enum | None |
 
 If you are looking for where a type like `SettlementHoldReason` is stored on-chain, look at the **Treasury** DataKey table above (`Settlement(u64)` embeds it). The crates themselves are compile-time dependencies only.
 
